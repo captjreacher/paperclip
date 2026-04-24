@@ -11,6 +11,7 @@ data/
 .pnpm-store/
 tmp-*
 cli/tmp/
+.claude/
 
 # Scratch/seed scripts (but not scripts/ dir)
 check-*.mjs

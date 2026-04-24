@@ -13,6 +13,7 @@ import { instanceSettingsService } from "./instance-settings.js";
 const PLUGIN_EVENT_SET: ReadonlySet<string> = new Set(PLUGIN_EVENT_TYPES);
 
 let _pluginEventBus: PluginEventBus | null = null;
+const _pluginEventObservers = new Set<(event: PluginEvent) => Promise<void> | void>();
 
 /** Wire the plugin event bus so domain events are forwarded to plugins. */
 export function setPluginEventBus(bus: PluginEventBus): void {
@@ -20,6 +21,14 @@ export function setPluginEventBus(bus: PluginEventBus): void {
     logger.warn("setPluginEventBus called more than once, replacing existing bus");
   }
   _pluginEventBus = bus;
+}
+
+/** Register a best-effort observer for core plugin-domain events. */
+export function registerPluginEventObserver(observer: (event: PluginEvent) => Promise<void> | void): () => void {
+  _pluginEventObservers.add(observer);
+  return () => {
+    _pluginEventObservers.delete(observer);
+  };
 }
 
 export interface LogActivityInput {
@@ -69,7 +78,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     },
   });
 
-  if (_pluginEventBus && PLUGIN_EVENT_SET.has(input.action)) {
+  if (PLUGIN_EVENT_SET.has(input.action)) {
     const event: PluginEvent = {
       eventId: randomUUID(),
       eventType: input.action as PluginEventType,
@@ -85,10 +94,19 @@ export async function logActivity(db: Db, input: LogActivityInput) {
         runId: input.runId ?? null,
       },
     };
-    void _pluginEventBus.emit(event).then(({ errors }) => {
-      for (const { pluginId, error } of errors) {
-        logger.warn({ pluginId, eventType: event.eventType, err: error }, "plugin event handler failed");
-      }
-    }).catch(() => {});
+    for (const observer of _pluginEventObservers) {
+      void Promise.resolve()
+        .then(() => observer(event))
+        .catch((error) => {
+          logger.warn({ eventType: event.eventType, err: error }, "plugin event observer failed");
+        });
+    }
+    if (_pluginEventBus) {
+      void _pluginEventBus.emit(event).then(({ errors }) => {
+        for (const { pluginId, error } of errors) {
+          logger.warn({ pluginId, eventType: event.eventType, err: error }, "plugin event handler failed");
+        }
+      }).catch(() => {});
+    }
   }
 }

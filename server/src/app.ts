@@ -1,7 +1,7 @@
 import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
@@ -44,13 +44,14 @@ import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
 import { createPluginEventBus } from "./services/plugin-event-bus.js";
-import { setPluginEventBus } from "./services/activity-log.js";
+import { registerPluginEventObserver, setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
+import { issueService } from "./services/issues.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
@@ -95,6 +96,33 @@ export function shouldEnablePrivateHostnameGuard(opts: {
     opts.deploymentExposure === "private" &&
     (opts.deploymentMode === "local_trusted" || opts.deploymentMode === "authenticated")
   );
+}
+
+async function bootstrapEngageGroovyOverlay(input: {
+  subscribe: (eventPattern: string, handler: (event: unknown) => Promise<void>) => () => void;
+  loadIssue: (issueId: string) => Promise<unknown>;
+}) {
+  const extensionPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../extensions/engagegroovy/bootstrap.js");
+  if (!fs.existsSync(extensionPath)) return null;
+
+  try {
+    const mod = await import(pathToFileURL(extensionPath).href);
+    if (typeof mod.bootstrapEngageGroovyOverlay !== "function") {
+      logger.warn({ extensionPath }, "ENGAGEGROOVY bootstrap module does not export bootstrapEngageGroovyOverlay");
+      return null;
+    }
+    return await mod.bootstrapEngageGroovyOverlay({
+      eventBus: {
+        subscribe: input.subscribe,
+      },
+      loadIssue: input.loadIssue,
+      logger,
+      env: process.env,
+    });
+  } catch (err) {
+    logger.warn({ err, extensionPath }, "Failed to initialize ENGAGEGROOVY overlay");
+    return null;
+  }
 }
 
 export async function createApp(
@@ -212,8 +240,17 @@ export async function createApp(
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = createPluginWorkerManager();
   const pluginRegistry = pluginRegistryService(db);
+  const issuesSvc = issueService(db);
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);
+  const engageGroovyOverlay = await bootstrapEngageGroovyOverlay({
+    subscribe: (eventPattern, handler) =>
+      registerPluginEventObserver(async (event) => {
+        if ((event as { eventType?: string }).eventType !== eventPattern) return;
+        await handler(event);
+      }),
+    loadIssue: (issueId) => issuesSvc.getById(issueId),
+  });
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, { workerManager });
   const scheduler = createPluginJobScheduler({
@@ -429,6 +466,7 @@ export async function createApp(
     if (feedbackExportTimer) clearInterval(feedbackExportTimer);
     devWatcher?.close();
     viteHtmlRenderer?.dispose();
+    engageGroovyOverlay?.dispose?.();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();
   });

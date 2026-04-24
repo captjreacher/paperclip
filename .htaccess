@@ -1,0 +1,9 @@
+RewriteEngine On
+
+# Force non-www
+RewriteCond %{HTTP_HOST} ^www\.engagegroovy\.com$ [NC]
+RewriteRule ^(.*)$ https://engagegroovy.com/$1 [L,R=301]
+
+# Optional: force HTTPS
+RewriteCond %{HTTPS} !=on
+RewriteRule ^(.*)$ https://engagegroovy.com/$1 [L,R=301]

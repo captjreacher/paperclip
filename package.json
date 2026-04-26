@@ -37,7 +37,9 @@
     "evals:smoke": "cd evals/promptfoo && npx promptfoo@0.103.3 eval",
     "test:release-smoke": "npx playwright test --config tests/release-smoke/playwright.config.ts",
     "test:release-smoke:headed": "npx playwright test --config tests/release-smoke/playwright.config.ts --headed",
-    "metrics:paperclip-commits": "tsx scripts/paperclip-commit-metrics.ts"
+    "metrics:paperclip-commits": "tsx scripts/paperclip-commit-metrics.ts",
+    "deploy:cpanel": "pnpm --filter @paperclipai/deploy-cpanel exec tsx src/cli.ts",
+    "deploy:cpanel:dry-run": "pnpm --filter @paperclipai/deploy-cpanel exec tsx src/cli.ts --dry-run"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
@@ -57,5 +59,8 @@
     "overrides": {
       "rollup": ">=4.59.0"
     }
+  },
+  "dependencies": {
+    "mdn-data": "^2.28.0"
   }
 }

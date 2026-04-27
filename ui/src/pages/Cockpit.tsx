@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { ComponentType, ReactNode } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowRight,
@@ -14,6 +14,7 @@ import {
   GitBranch,
   MessageSquarePlus,
   RadioTower,
+  RefreshCcw,
   ShieldCheck,
   Sparkles,
   X,
@@ -22,11 +23,12 @@ import type {
   CockpitAgentOverview,
   CockpitEventRow,
   CockpitIssue,
+  CockpitIssueDetail,
   CockpitRoutingDecisionRow,
 } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useCompany } from "@/context/CompanyContext";
-import { useDialog } from "@/context/DialogContext";
 import { useToastActions } from "@/context/ToastContext";
 import { cockpitApi } from "@/api/cockpit";
 import { queryKeys } from "@/lib/queryKeys";
@@ -34,6 +36,7 @@ import { cn } from "@/lib/utils";
 
 type DraftState = "Drafting" | "Needs Review" | "Needs Design" | "Ready to Publish" | "Published" | "Needs Repurpose";
 type BriefState = "Intake" | "Analysis" | "Draft Brief" | "Review" | "Approved" | "Converted to Work";
+type IssueBoardFilterKey = "open" | "blocked" | "idle" | "qa" | "boss" | "close_candidates" | "recently_closed";
 
 interface DraftCardData {
   id: string;
@@ -54,6 +57,11 @@ interface BriefCardData {
   source: string;
 }
 
+interface IssueBoardFilters {
+  queue: IssueBoardFilterKey | null;
+  owner: string | null;
+}
+
 const DRAFT_STATES: DraftState[] = ["Drafting", "Needs Review", "Needs Design", "Ready to Publish", "Published", "Needs Repurpose"];
 const BRIEF_STATES: BriefState[] = ["Intake", "Analysis", "Draft Brief", "Review", "Approved", "Converted to Work"];
 const BOARD_COLUMNS = [
@@ -67,6 +75,18 @@ const BOARD_COLUMNS = [
   "Done",
   "Close Candidate",
   "Closed",
+] as const;
+const OPEN_ISSUE_STATUSES = new Set(["backlog", "todo", "in_progress", "in_review", "blocked", "idle", "routed", "qa_review", "boss_review"]);
+const MOCK_METRIC_KEYS = new Set(["drafts", "content_review"]);
+const READ_ONLY_ACTIONS = [
+  { label: "Queue owner request", action: "cockpit.todo.assign_owner_request" },
+  { label: "Queue blocked note", action: "cockpit.todo.mark_blocked" },
+  { label: "Queue unblock note", action: "cockpit.todo.mark_unblocked" },
+  { label: "Queue QA request", action: "cockpit.todo.send_to_qa" },
+  { label: "Queue boss review request", action: "cockpit.todo.send_to_boss_review" },
+  { label: "Queue close-candidate review", action: "cockpit.todo.mark_close_candidate" },
+  { label: "Queue close request", action: "cockpit.todo.close_issue" },
+  { label: "Queue comment request", action: "cockpit.todo.add_comment" },
 ] as const;
 
 const MOCK_DRAFTS: DraftCardData[] = [
@@ -100,6 +120,11 @@ function ageLabel(value: string | Date | null | undefined) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+function describeError(error: unknown) {
+  if (error instanceof Error && error.message) return error.message;
+  return "Unknown API error";
+}
+
 function payloadExists(issue: CockpitIssue) {
   return Boolean(issue.payload && Object.values(issue.payload).some((value) => value !== null && value !== undefined));
 }
@@ -119,29 +144,124 @@ function priorityTone(priority: string) {
   return "border-blue-500/30 bg-blue-500/10 text-blue-200";
 }
 
+function normalizeOwner(value: string | null | undefined) {
+  return String(value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function isIdleIssue(issue: CockpitIssue) {
+  const updatedAt = new Date(issue.updatedAt).getTime();
+  return String(issue.status) === "idle" || ((issue.status === "backlog" || issue.status === "todo") && updatedAt < Date.now() - 3 * 24 * 60 * 60 * 1000);
+}
+
+function isQaIssue(issue: CockpitIssue) {
+  return issue.status === "in_review" || String(issue.status) === "qa_review";
+}
+
+function isBossReviewIssue(issue: CockpitIssue) {
+  const executionState = asRecord(issue.executionState);
+  return String(issue.status) === "boss_review" || executionState?.currentStageType === "boss_review";
+}
+
+function isCloseCandidateIssue(issue: CockpitIssue) {
+  return issue.status === "done" && new Date(issue.updatedAt).getTime() < Date.now() - 7 * 24 * 60 * 60 * 1000;
+}
+
+function isRecentlyClosedIssue(issue: CockpitIssue) {
+  return ["done", "closed", "cancelled"].includes(String(issue.status)) && new Date(issue.updatedAt).getTime() >= Date.now() - 7 * 24 * 60 * 60 * 1000;
+}
+
+const ISSUE_FILTER_CONFIG: Record<IssueBoardFilterKey, { label: string; description: string; matches: (issue: CockpitIssue) => boolean }> = {
+  open: {
+    label: "Open issues",
+    description: "All active non-terminal work across the board.",
+    matches: (issue) => OPEN_ISSUE_STATUSES.has(String(issue.status)),
+  },
+  blocked: {
+    label: "Blocked",
+    description: "Issues waiting on an unblock or escalation.",
+    matches: (issue) => String(issue.status) === "blocked",
+  },
+  idle: {
+    label: "Idle",
+    description: "Issues that are stale or explicitly marked idle.",
+    matches: isIdleIssue,
+  },
+  qa: {
+    label: "Awaiting QA",
+    description: "Issues waiting on QA or review confirmation.",
+    matches: isQaIssue,
+  },
+  boss: {
+    label: "Awaiting boss review",
+    description: "Issues currently paused in boss review.",
+    matches: isBossReviewIssue,
+  },
+  close_candidates: {
+    label: "Auto-close candidates",
+    description: "Done issues old enough to review for auto-close.",
+    matches: isCloseCandidateIssue,
+  },
+  recently_closed: {
+    label: "Recently closed",
+    description: "Recently completed or closed work.",
+    matches: isRecentlyClosedIssue,
+  },
+};
+
+function isIssueBoardFilterKey(value: string): value is IssueBoardFilterKey {
+  return value in ISSUE_FILTER_CONFIG;
+}
+
+function focusSection(id: string) {
+  const element = document.getElementById(id);
+  if (!(element instanceof HTMLElement)) return;
+  element.scrollIntoView({ behavior: "smooth", block: "start" });
+  window.setTimeout(() => {
+    element.focus({ preventScroll: true });
+  }, 250);
+}
+
 function Badge({ children, className }: { children: ReactNode; className?: string }) {
   return <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium", className)}>{children}</span>;
+}
+
+function SourceBadge({ label, tone = "live" }: { label: string; tone?: "live" | "mock" | "placeholder" | "muted" }) {
+  const tones: Record<NonNullable<typeof tone>, string> = {
+    live: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+    mock: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+    placeholder: "border-violet-500/30 bg-violet-500/10 text-violet-200",
+    muted: "border-border bg-muted/40 text-muted-foreground",
+  };
+
+  return <Badge className={tones[tone]}>{label}</Badge>;
 }
 
 function boardColumnForIssue(issue: CockpitIssue) {
   const status = String(issue.status);
   const updatedAt = new Date(issue.updatedAt).getTime();
-  const idle = ["backlog", "todo"].includes(status) && updatedAt < Date.now() - 3 * 24 * 60 * 60 * 1000;
-  const executionState = issue.executionState && typeof issue.executionState === "object" ? issue.executionState as unknown as Record<string, unknown> : null;
+  const executionState = asRecord(issue.executionState);
   if (["closed", "cancelled"].includes(status)) return "Closed";
   if (status === "done" && updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) return "Close Candidate";
   if (status === "done") return "Done";
   if (executionState?.currentStageType === "boss_review" || status === "boss_review") return "Boss Review";
   if (status === "in_review" || status === "qa_review") return "QA Review";
   if (status === "blocked") return "Blocked";
-  if (idle || status === "idle") return "Idle";
+  if (isIdleIssue(issue)) return "Idle";
   if (status === "in_progress") return "In Progress";
   if (status === "todo" || (status === "backlog" && issue.currentOwner)) return "Routed";
   return "New";
 }
 
-function scrollToSection(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+function getFilteredIssues(issues: CockpitIssue[], filters: IssueBoardFilters) {
+  return issues.filter((issue) => {
+    if (filters.queue && !ISSUE_FILTER_CONFIG[filters.queue].matches(issue)) return false;
+    if (filters.owner && normalizeOwner(issue.currentOwner) !== normalizeOwner(filters.owner)) return false;
+    return true;
+  });
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {
@@ -153,51 +273,151 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
-function MetricCards({ metrics, draftCount, contentReviewCount }: { metrics: { key: string; label: string; value: number; trendPlaceholder: string }[]; draftCount: number; contentReviewCount: number }) {
+function ErrorPanel({ title, body, onRetry }: { title: string; body: string; onRetry?: () => void }) {
+  return (
+    <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-5 text-sm text-red-100">
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" />
+        <div className="space-y-3">
+          <div>
+            <p className="font-medium text-red-50">{title}</p>
+            <p className="mt-1 text-xs text-red-200/90">{body}</p>
+          </div>
+          {onRetry ? (
+            <Button variant="outline" size="sm" className="border-red-400/30 bg-red-950/20 text-red-50 hover:bg-red-900/30" onClick={onRetry}>
+              <RefreshCcw className="h-3.5 w-3.5" />
+              Retry
+            </Button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MetricCards({
+  metrics,
+  draftCount,
+  contentReviewCount,
+  activeFilter,
+  onMetricSelect,
+}: {
+  metrics: { key: string; label: string; value: number; trendPlaceholder: string }[];
+  draftCount: number;
+  contentReviewCount: number;
+  activeFilter: IssueBoardFilterKey | null;
+  onMetricSelect: (filterKey: IssueBoardFilterKey) => void;
+}) {
   const adjusted = metrics.map((metric) => {
     if (metric.key === "drafts") return { ...metric, value: draftCount };
     if (metric.key === "content_review") return { ...metric, value: contentReviewCount };
     return metric;
   });
+
   return (
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-      {adjusted.map((metric) => (
-        <div key={metric.key} className="rounded-2xl border border-border bg-card/80 p-4 shadow-sm backdrop-blur">
-          <div className="flex items-start justify-between gap-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{metric.label}</p>
-            <Sparkles className="h-4 w-4 text-primary/70" />
+      {adjusted.map((metric) => {
+        const metricFilterKey: IssueBoardFilterKey | null = isIssueBoardFilterKey(metric.key) ? metric.key : null;
+        const isClickable = metricFilterKey !== null;
+        const isActive = metricFilterKey !== null && activeFilter === metricFilterKey;
+        const isMockMetric = MOCK_METRIC_KEYS.has(metric.key);
+
+        if (metricFilterKey) {
+          return (
+            <button
+              key={metric.key}
+              type="button"
+              aria-pressed={isActive}
+              onClick={() => onMetricSelect(metricFilterKey)}
+              className={cn(
+                "rounded-2xl border bg-card/80 p-4 text-left shadow-sm backdrop-blur transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+                isActive
+                  ? "border-primary bg-primary/10 shadow-primary/10"
+                  : "border-border hover:border-primary/40 hover:bg-accent/30",
+              )}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{metric.label}</p>
+                <Sparkles className={cn("h-4 w-4", isActive ? "text-primary" : "text-primary/70")} />
+              </div>
+              <div className="mt-3 text-3xl font-semibold tracking-tight">{metric.value}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <p className="text-xs text-muted-foreground">{metric.trendPlaceholder}</p>
+                <span className={cn("text-[11px] font-medium", isActive ? "text-primary" : "text-muted-foreground")}>
+                  {isActive ? "Issue board filter active" : "Click to filter issue board"}
+                </span>
+              </div>
+            </button>
+          );
+        }
+
+        return (
+          <div key={metric.key} className="rounded-2xl border border-border bg-card/80 p-4 shadow-sm backdrop-blur">
+            <div className="flex items-start justify-between gap-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{metric.label}</p>
+              <Sparkles className="h-4 w-4 text-primary/70" />
+            </div>
+            <div className="mt-3 text-3xl font-semibold tracking-tight">{metric.value}</div>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <p className="text-xs text-muted-foreground">{metric.trendPlaceholder}</p>
+              {isMockMetric ? <SourceBadge label="Mock / adapter pending" tone="mock" /> : null}
+            </div>
           </div>
-          <div className="mt-3 text-3xl font-semibold tracking-tight">{metric.value}</div>
-          <p className="mt-2 text-xs text-muted-foreground">{metric.trendPlaceholder}</p>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
 function AgentFlow({ agents, onFilter }: { agents: CockpitAgentOverview[]; onFilter: (owner: string) => void }) {
+  const liveAgents = agents.filter((agent) => agent.id).length;
+  const placeholderLanes = agents.length - liveAgents;
+
   return (
     <section id="agent-flow" className="space-y-3">
-      <SectionTitle icon={Bot} title="Agent Flow Overview" subtitle="Workload, blocked lanes, stale ownership, and review load by operator role." />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionTitle icon={Bot} title="Agent Flow Overview" subtitle="Workload, blocked lanes, stale ownership, and review load by operator role." />
+        <div className="flex flex-wrap gap-2">
+          <SourceBadge label={`${liveAgents} live agent${liveAgents === 1 ? "" : "s"}`} tone="live" />
+          {placeholderLanes > 0 ? <SourceBadge label={`${placeholderLanes} placeholder lane${placeholderLanes === 1 ? "" : "s"}`} tone="placeholder" /> : null}
+        </div>
+      </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {agents.map((agent) => (
-          <div key={`${agent.id ?? agent.name}`} className="rounded-2xl border border-border bg-card p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="font-semibold">{agent.name}</h3>
-                <p className="text-xs uppercase tracking-wide text-muted-foreground">{agent.role}</p>
+        {agents.map((agent) => {
+          const isPlaceholder = !agent.id;
+          return (
+            <div
+              key={`${agent.id ?? agent.name}`}
+              className={cn(
+                "rounded-2xl border bg-card p-4",
+                isPlaceholder ? "border-dashed border-violet-500/30 bg-violet-500/5" : "border-border",
+              )}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="font-semibold">{agent.name}</h3>
+                    <SourceBadge label={isPlaceholder ? "Placeholder lane" : "Live agent"} tone={isPlaceholder ? "placeholder" : "live"} />
+                  </div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">{agent.role}</p>
+                </div>
+                <Button variant="outline" size="xs" onClick={() => onFilter(agent.name)}>
+                  Filter issues
+                </Button>
               </div>
-              <Button variant="outline" size="xs" onClick={() => onFilter(agent.name)}>Filter</Button>
+              <div className="mt-4 grid grid-cols-4 gap-2 text-center text-xs">
+                <MiniStat label="Active" value={agent.activeIssues} />
+                <MiniStat label="Blocked" value={agent.blockedIssues} tone="text-red-300" />
+                <MiniStat label="Idle" value={agent.idleIssues} tone="text-amber-300" />
+                <MiniStat label="Review" value={agent.awaitingReview} tone="text-sky-300" />
+              </div>
+              <p className="mt-4 text-xs text-muted-foreground">
+                Last activity: {dateLabel(agent.lastActivityAt)}
+                {isPlaceholder ? " · Derived from issue ownership, not a registered agent record." : ""}
+              </p>
             </div>
-            <div className="mt-4 grid grid-cols-4 gap-2 text-center text-xs">
-              <MiniStat label="Active" value={agent.activeIssues} />
-              <MiniStat label="Blocked" value={agent.blockedIssues} tone="text-red-300" />
-              <MiniStat label="Idle" value={agent.idleIssues} tone="text-amber-300" />
-              <MiniStat label="Review" value={agent.awaitingReview} tone="text-sky-300" />
-            </div>
-            <p className="mt-4 text-xs text-muted-foreground">Last activity: {dateLabel(agent.lastActivityAt)}</p>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -226,45 +446,119 @@ function SectionTitle({ icon: Icon, title, subtitle }: { icon: ComponentType<{ c
 
 function IssueCard({ issue, onOpen }: { issue: CockpitIssue; onOpen: (issue: CockpitIssue) => void }) {
   return (
-    <button type="button" onClick={() => onOpen(issue)} className="w-full rounded-xl border border-border bg-background/70 p-3 text-left transition hover:border-primary/50 hover:bg-accent/30">
+    <button
+      type="button"
+      onClick={() => onOpen(issue)}
+      className="w-full rounded-xl border border-border bg-background/70 p-3 text-left transition hover:border-primary/50 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+      aria-label={`Open issue ${issue.title}`}
+    >
       <div className="flex items-start justify-between gap-2">
-        <h4 className="line-clamp-2 text-sm font-medium leading-snug">{issue.title}</h4>
-        {payloadExists(issue) && <span title="Payload available" className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-primary" />}
+        <div>
+          <h4 className="line-clamp-2 text-sm font-medium leading-snug">{issue.title}</h4>
+          {issue.identifier ? <p className="mt-1 font-mono text-[11px] text-muted-foreground">{issue.identifier}</p> : null}
+        </div>
+        {payloadExists(issue) ? <span title="Payload available" className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-primary" /> : null}
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5">
         <Badge className={priorityTone(issue.priority)}>{issue.priority}</Badge>
-        <Badge className={statusTone(issue.status)}>{issue.status}</Badge>
+        <Badge className={statusTone(String(issue.status))}>{String(issue.status)}</Badge>
       </div>
       <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
         <span>Owner: {issue.currentOwner ?? "Unassigned"}</span>
         <span>Source: {issue.sourceSystem ?? "unknown"}</span>
         <span>Updated {ageLabel(issue.updatedAt)}</span>
       </div>
+      <div className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary">
+        Open issue detail
+        <ArrowRight className="h-3 w-3" />
+      </div>
     </button>
   );
 }
 
-function IssueFlowBoard({ issues, ownerFilter, onOpen }: { issues: CockpitIssue[]; ownerFilter: string | null; onOpen: (issue: CockpitIssue) => void }) {
-  const filtered = ownerFilter ? issues.filter((issue) => (issue.currentOwner ?? "").toLowerCase().includes(ownerFilter.toLowerCase())) : issues;
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
-    <section id="issue-board" className="space-y-3">
-      <SectionTitle icon={GitBranch} title="Issue Flow Board" subtitle={ownerFilter ? `Filtered by ${ownerFilter}` : "Kanban view of operational flow and intervention queues."} />
-      <div className="grid gap-3 overflow-x-auto pb-2 xl:grid-cols-5 2xl:grid-cols-10">
-        {BOARD_COLUMNS.map((column) => {
-          const columnIssues = filtered.filter((issue) => boardColumnForIssue(issue) === column);
-          return (
-            <div key={column} className="min-w-64 rounded-2xl border border-border bg-card/70 p-3">
-              <div className="mb-3 flex items-center justify-between">
-                <h3 className="text-sm font-semibold">{column}</h3>
-                <Badge className="border-border bg-muted/40 text-muted-foreground">{columnIssues.length}</Badge>
-              </div>
-              <div className="space-y-2">
-                {columnIssues.length > 0 ? columnIssues.map((issue) => <IssueCard key={issue.id} issue={issue} onOpen={onOpen} />) : <p className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">No issues</p>}
-              </div>
-            </div>
-          );
-        })}
+    <button
+      type="button"
+      onClick={onRemove}
+      className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary transition hover:bg-primary/15"
+    >
+      {label}
+      <X className="h-3 w-3" />
+    </button>
+  );
+}
+
+function IssueFlowBoard({
+  issues,
+  filters,
+  onOpen,
+  onClearFilters,
+  onRemoveQueueFilter,
+  onRemoveOwnerFilter,
+}: {
+  issues: CockpitIssue[];
+  filters: IssueBoardFilters;
+  onOpen: (issue: CockpitIssue) => void;
+  onClearFilters: () => void;
+  onRemoveQueueFilter: () => void;
+  onRemoveOwnerFilter: () => void;
+}) {
+  const filtered = getFilteredIssues(issues, filters);
+  const hasFilters = Boolean(filters.queue || filters.owner);
+  const subtitleBits = [
+    filters.queue ? ISSUE_FILTER_CONFIG[filters.queue].label : null,
+    filters.owner ? `Owner: ${filters.owner}` : null,
+  ].filter(Boolean);
+
+  return (
+    <section id="issue-board" tabIndex={-1} className="space-y-3 focus:outline-none">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionTitle
+          icon={GitBranch}
+          title="Issue Flow Board"
+          subtitle={subtitleBits.length > 0 ? `Filtered to ${subtitleBits.join(" · ")}` : "Kanban view of operational flow and intervention queues."}
+        />
+        <Badge className="border-border bg-muted/40 text-muted-foreground">
+          Showing {filtered.length} of {issues.length}
+        </Badge>
       </div>
+      {hasFilters ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-card p-3">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Active filters</span>
+          {filters.queue ? <FilterChip label={ISSUE_FILTER_CONFIG[filters.queue].label} onRemove={onRemoveQueueFilter} /> : null}
+          {filters.owner ? <FilterChip label={`Owner: ${filters.owner}`} onRemove={onRemoveOwnerFilter} /> : null}
+          <Button variant="ghost" size="sm" onClick={onClearFilters}>
+            Clear filters
+          </Button>
+        </div>
+      ) : null}
+      {issues.length === 0 ? (
+        <EmptyState title="No issues loaded" body="This company does not have any cockpit-visible issues yet." />
+      ) : filtered.length === 0 ? (
+        <EmptyState title="No issues match the active filters" body="Try clearing one or more filters to inspect the full board again." />
+      ) : (
+        <div className="grid gap-3 overflow-x-auto pb-2 xl:grid-cols-5 2xl:grid-cols-10">
+          {BOARD_COLUMNS.map((column) => {
+            const columnIssues = filtered.filter((issue) => boardColumnForIssue(issue) === column);
+            return (
+              <div key={column} className="min-w-64 rounded-2xl border border-border bg-card/70 p-3">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">{column}</h3>
+                  <Badge className="border-border bg-muted/40 text-muted-foreground">{columnIssues.length}</Badge>
+                </div>
+                <div className="space-y-2">
+                  {columnIssues.length > 0 ? (
+                    columnIssues.map((issue) => <IssueCard key={issue.id} issue={issue} onOpen={onOpen} />)
+                  ) : (
+                    <p className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">No issues in this lane</p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
@@ -280,7 +574,13 @@ function PipelineSection<T extends { id: string; title: string; owner: string; s
 }) {
   return (
     <section id={props.id} className="space-y-3">
-      <SectionTitle icon={props.icon} title={props.title} subtitle={props.subtitle} />
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionTitle icon={props.icon} title={props.title} subtitle={props.subtitle} />
+        <SourceBadge label="Mock / adapter pending" tone="mock" />
+      </div>
+      <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-3 text-xs text-amber-100/90">
+        These cards use isolated mock data until the adapter-backed drafts and briefs endpoints land.
+      </div>
       <div className="grid gap-3 lg:grid-cols-3 2xl:grid-cols-6">
         {props.states.map((state) => {
           const stateItems = props.items.filter((item) => item.status === state);
@@ -298,7 +598,7 @@ function PipelineSection<T extends { id: string; title: string; owner: string; s
                     <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p>
                   </div>
                 ))}
-                {stateItems.length === 0 && <p className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">No items</p>}
+                {stateItems.length === 0 ? <p className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">No items</p> : null}
               </div>
             </div>
           );
@@ -309,7 +609,6 @@ function PipelineSection<T extends { id: string; title: string; owner: string; s
 }
 
 function EventStream({ events }: { events: CockpitEventRow[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
   const [filters, setFilters] = useState<Record<string, string>>({ eventType: "", issueId: "", sourceSystem: "", from: "", to: "" });
   const filtered = events.filter((event) => {
     if (filters.eventType && !event.eventType.toLowerCase().includes(filters.eventType.toLowerCase())) return false;
@@ -319,33 +618,59 @@ function EventStream({ events }: { events: CockpitEventRow[] }) {
     if (filters.to && new Date(event.createdAt).getTime() > new Date(filters.to).getTime()) return false;
     return true;
   });
+
   return (
-    <section id="event-log" className="space-y-3">
-      <SectionTitle icon={RadioTower} title="Event Stream" subtitle="Audit-friendly event stream normalized from activity and heartbeat events." />
+    <section id="event-log" tabIndex={-1} className="space-y-3 focus:outline-none">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionTitle icon={RadioTower} title="Event Stream" subtitle="Audit-friendly event stream normalized from activity and heartbeat events." />
+        <SourceBadge label="Live backend data" tone="live" />
+      </div>
       <FilterBar filters={filters} setFilters={setFilters} />
-      <LogTable emptyTitle="No events" emptyBody="Events will appear here as agents and board operators act." rows={filtered} expanded={expanded} setExpanded={setExpanded} />
+      <EventTable emptyTitle="No events" emptyBody="Events will appear here as agents and board operators act." rows={filtered} />
     </section>
   );
 }
 
 function FilterBar({ filters, setFilters }: { filters: Record<string, string>; setFilters: (filters: Record<string, string>) => void }) {
+  const hasFilters = Object.values(filters).some(Boolean);
+
   return (
-    <div className="grid gap-2 rounded-2xl border border-border bg-card p-3 md:grid-cols-5">
+    <div className="grid gap-2 rounded-2xl border border-border bg-card p-3 md:grid-cols-[repeat(5,minmax(0,1fr))_auto]">
       {Object.keys(filters).map((key) => (
-        <input key={key} value={filters[key]} onChange={(event) => setFilters({ ...filters, [key]: event.target.value })} placeholder={key} type={key === "from" || key === "to" ? "date" : "text"} className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:border-ring" />
+        <input
+          key={key}
+          value={filters[key]}
+          onChange={(event) => setFilters({ ...filters, [key]: event.target.value })}
+          placeholder={key}
+          type={key === "from" || key === "to" ? "date" : "text"}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus:border-ring"
+        />
       ))}
+      <Button variant="ghost" size="sm" disabled={!hasFilters} onClick={() => setFilters({ eventType: "", issueId: "", sourceSystem: "", from: "", to: "" })}>
+        Clear
+      </Button>
     </div>
   );
 }
 
-function LogTable({ rows, expanded, setExpanded, emptyTitle, emptyBody }: { rows: CockpitEventRow[]; expanded: string | null; setExpanded: (id: string | null) => void; emptyTitle: string; emptyBody: string }) {
+function EventTable({ rows, emptyTitle, emptyBody }: { rows: CockpitEventRow[]; emptyTitle: string; emptyBody: string }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
   if (rows.length === 0) return <EmptyState title={emptyTitle} body={emptyBody} />;
+
   return (
     <div className="overflow-hidden rounded-2xl border border-border bg-card">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[860px] text-left text-sm">
           <thead className="border-b border-border bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
-            <tr><th className="px-3 py-2">created_at</th><th className="px-3 py-2">event_type</th><th className="px-3 py-2">issue_id</th><th className="px-3 py-2">source_system</th><th className="px-3 py-2">payload summary</th><th className="px-3 py-2">raw</th></tr>
+            <tr>
+              <th className="px-3 py-2">created_at</th>
+              <th className="px-3 py-2">event_type</th>
+              <th className="px-3 py-2">issue_id</th>
+              <th className="px-3 py-2">source_system</th>
+              <th className="px-3 py-2">payload summary</th>
+              <th className="px-3 py-2">raw</th>
+            </tr>
           </thead>
           <tbody>
             {rows.map((row) => (
@@ -354,8 +679,16 @@ function LogTable({ rows, expanded, setExpanded, emptyTitle, emptyBody }: { rows
                 <td className="px-3 py-2"><Badge className={statusTone(row.eventType)}>{row.eventType}</Badge></td>
                 <td className="px-3 py-2 font-mono text-xs">{row.issueId ?? "-"}</td>
                 <td className="px-3 py-2 text-xs">{row.sourceSystem ?? "-"}</td>
-                <td className="px-3 py-2 text-xs text-muted-foreground">{row.payloadSummary}{expanded === row.id && <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-muted/50 p-3 text-[11px] text-foreground">{JSON.stringify(row.payload, null, 2)}</pre>}</td>
-                <td className="px-3 py-2"><Button variant="ghost" size="xs" onClick={() => setExpanded(expanded === row.id ? null : row.id)}><ChevronDown className="h-3 w-3" />Raw</Button></td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">
+                  {row.payloadSummary}
+                  {expanded === row.id ? <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-muted/50 p-3 text-[11px] text-foreground">{JSON.stringify(row.payload, null, 2)}</pre> : null}
+                </td>
+                <td className="px-3 py-2">
+                  <Button variant="ghost" size="xs" onClick={() => setExpanded(expanded === row.id ? null : row.id)}>
+                    <ChevronDown className="h-3 w-3" />
+                    Raw
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -366,85 +699,281 @@ function LogTable({ rows, expanded, setExpanded, emptyTitle, emptyBody }: { rows
 }
 
 function RoutingLog({ rows }: { rows: CockpitRoutingDecisionRow[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  if (rows.length === 0) {
-    return (
-      <section id="routing-log" className="space-y-3">
-        <SectionTitle icon={ShieldCheck} title="Routing Decisions Log" subtitle="Governance decisions and review outcomes." />
-        <EmptyState title="No routing decisions" body="Issue execution decisions will appear here once review gates produce decisions." />
-      </section>
-    );
-  }
   return (
-    <section id="routing-log" className="space-y-3">
-      <SectionTitle icon={ShieldCheck} title="Routing Decisions Log" subtitle="Governance decisions and review outcomes." />
-      <div className="overflow-hidden rounded-2xl border border-border bg-card">
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[860px] text-left text-sm">
-            <thead className="border-b border-border bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
-              <tr><th className="px-3 py-2">created_at</th><th className="px-3 py-2">event_type</th><th className="px-3 py-2">action</th><th className="px-3 py-2">target_agent</th><th className="px-3 py-2">reason</th><th className="px-3 py-2">issue_id</th><th className="px-3 py-2">fields</th></tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id} className="border-b border-border/60 align-top last:border-0">
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{dateLabel(row.createdAt)}</td>
-                  <td className="px-3 py-2 text-xs">{row.eventType ?? "-"}</td>
-                  <td className="px-3 py-2"><Badge className={statusTone(row.action ?? "")}>{row.action ?? "-"}</Badge></td>
-                  <td className="px-3 py-2 font-mono text-xs">{row.targetAgent ?? "-"}</td>
-                  <td className="px-3 py-2 text-xs text-muted-foreground">{row.reason ?? "-"}{expanded === row.id && <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-muted/50 p-3 text-[11px] text-foreground">{JSON.stringify(row.fields, null, 2)}</pre>}</td>
-                  <td className="px-3 py-2 font-mono text-xs">{row.issueId ?? "-"}</td>
-                  <td className="px-3 py-2"><Button variant="ghost" size="xs" onClick={() => setExpanded(expanded === row.id ? null : row.id)}>Raw</Button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+    <section id="routing-log" tabIndex={-1} className="space-y-3 focus:outline-none">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionTitle icon={ShieldCheck} title="Routing Decisions Log" subtitle="Governance decisions and review outcomes." />
+        <SourceBadge label="Live backend data" tone="live" />
       </div>
+      <RoutingTable rows={rows} emptyTitle="No routing decisions" emptyBody="Issue execution decisions will appear here once review gates produce decisions." />
     </section>
   );
 }
 
-function IssueDrawer({ issue, events, routing, onClose, onAction }: { issue: CockpitIssue | null; events: CockpitEventRow[]; routing: CockpitRoutingDecisionRow[]; onClose: () => void; onAction: (action: string) => void }) {
-  if (!issue) return null;
-  const actions = ["Assign Owner", "Mark Blocked", "Mark Unblocked", "Send to QA", "Send to Boss Review", "Mark Close Candidate", "Close Issue", "Add Comment"];
+function RoutingTable({ rows, emptyTitle, emptyBody }: { rows: CockpitRoutingDecisionRow[]; emptyTitle: string; emptyBody: string }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  if (rows.length === 0) return <EmptyState title={emptyTitle} body={emptyBody} />;
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/45" onClick={onClose}>
-      <aside className="h-full w-full max-w-3xl overflow-auto border-l border-border bg-background p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-start justify-between gap-4">
-          <div><p className="text-xs uppercase tracking-wide text-muted-foreground">Issue detail</p><h2 className="mt-1 text-2xl font-semibold tracking-tight">{issue.title}</h2></div>
-          <Button variant="ghost" size="icon-sm" onClick={onClose}><X className="h-4 w-4" /></Button>
-        </div>
-        <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{issue.description || "No description provided."}</p>
-        <div className="mt-5 grid gap-2 sm:grid-cols-2">
-          {["status", "currentOwner", "priority", "sourceSystem", "sourceRef", "createdAt", "updatedAt"].map((key) => (
-            <div key={key} className="rounded-xl border border-border bg-card p-3"><p className="text-[11px] uppercase tracking-wide text-muted-foreground">{key}</p><p className="mt-1 text-sm font-medium">{key.endsWith("At") ? dateLabel(issue[key as keyof CockpitIssue] as string) : String(issue[key as keyof CockpitIssue] ?? "-")}</p></div>
-          ))}
-        </div>
-        <div className="mt-5 flex flex-wrap gap-2">{actions.map((action) => <Button key={action} variant={action === "Close Issue" ? "destructive" : "outline"} size="sm" onClick={() => onAction(action)}>{action}</Button>)}</div>
-        <DrawerBlock title="Payload JSON"><pre>{JSON.stringify(issue.payload ?? {}, null, 2)}</pre></DrawerBlock>
-        <DrawerBlock title="Related Events"><LogTable rows={events} expanded={null} setExpanded={() => undefined} emptyTitle="No related events" emptyBody="No event rows are currently linked to this issue." /></DrawerBlock>
-        <DrawerBlock title="Related Routing Decisions"><RoutingLog rows={routing} /></DrawerBlock>
-      </aside>
+    <div className="overflow-hidden rounded-2xl border border-border bg-card">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[860px] text-left text-sm">
+          <thead className="border-b border-border bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th className="px-3 py-2">created_at</th>
+              <th className="px-3 py-2">event_type</th>
+              <th className="px-3 py-2">action</th>
+              <th className="px-3 py-2">target_agent</th>
+              <th className="px-3 py-2">reason</th>
+              <th className="px-3 py-2">issue_id</th>
+              <th className="px-3 py-2">fields</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id} className="border-b border-border/60 align-top last:border-0">
+                <td className="px-3 py-2 text-xs text-muted-foreground">{dateLabel(row.createdAt)}</td>
+                <td className="px-3 py-2 text-xs">{row.eventType ?? "-"}</td>
+                <td className="px-3 py-2"><Badge className={statusTone(row.action ?? "")}>{row.action ?? "-"}</Badge></td>
+                <td className="px-3 py-2 font-mono text-xs">{row.targetAgent ?? "-"}</td>
+                <td className="px-3 py-2 text-xs text-muted-foreground">
+                  {row.reason ?? "-"}
+                  {expanded === row.id ? <pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-muted/50 p-3 text-[11px] text-foreground">{JSON.stringify(row.fields, null, 2)}</pre> : null}
+                </td>
+                <td className="px-3 py-2 font-mono text-xs">{row.issueId ?? "-"}</td>
+                <td className="px-3 py-2">
+                  <Button variant="ghost" size="xs" onClick={() => setExpanded(expanded === row.id ? null : row.id)}>
+                    Raw
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 function DrawerBlock({ title, children }: { title: string; children: ReactNode }) {
-  return <div className="mt-6 space-y-2"><h3 className="font-semibold">{title}</h3><div className="overflow-auto rounded-2xl border border-border bg-card p-3 text-xs">{children}</div></div>;
+  return (
+    <div className="mt-6 space-y-2">
+      <h3 className="font-semibold">{title}</h3>
+      <div className="overflow-auto rounded-2xl border border-border bg-card p-3 text-xs">{children}</div>
+    </div>
+  );
+}
+
+function IssueDetailFields({ issue }: { issue: CockpitIssue }) {
+  const fields = [
+    ["Issue ID", issue.id],
+    ["Identifier", issue.identifier ?? "-"],
+    ["Status", String(issue.status)],
+    ["Priority", issue.priority],
+    ["Current owner", issue.currentOwner ?? "Unassigned"],
+    ["Assignee agent", issue.assigneeAgentId ?? "-"],
+    ["Assignee user", issue.assigneeUserId ?? "-"],
+    ["Source system", issue.sourceSystem ?? "-"],
+    ["Source ref", issue.sourceRef ?? "-"],
+    ["Issue number", issue.issueNumber ?? "-"],
+    ["Project ID", issue.projectId ?? "-"],
+    ["Goal ID", issue.goalId ?? "-"],
+    ["Request depth", issue.requestDepth],
+    ["Created", dateLabel(issue.createdAt)],
+    ["Updated", dateLabel(issue.updatedAt)],
+    ["Started", dateLabel(issue.startedAt)],
+    ["Completed", dateLabel(issue.completedAt)],
+    ["Cancelled", dateLabel(issue.cancelledAt)],
+  ] as const;
+
+  return (
+    <div className="mt-5 grid gap-2 sm:grid-cols-2">
+      {fields.map(([label, value]) => (
+        <div key={label} className="rounded-xl border border-border bg-card p-3">
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
+          <p className="mt-1 break-all text-sm font-medium">{String(value ?? "-")}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function IssueDrawer({
+  issue,
+  detail,
+  isLoading,
+  isError,
+  errorMessage,
+  onRetry,
+  onClose,
+  onAction,
+  actionPending,
+}: {
+  issue: CockpitIssue | null;
+  detail: CockpitIssueDetail | undefined;
+  isLoading: boolean;
+  isError: boolean;
+  errorMessage: string | null;
+  onRetry: () => void;
+  onClose: () => void;
+  onAction: (action: string, label: string) => void;
+  actionPending: boolean;
+}) {
+  if (!issue) return null;
+
+  const resolvedIssue = detail?.issue ?? issue;
+  const relatedEvents = detail?.events ?? [];
+  const relatedRouting = detail?.routingDecisions ?? [];
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/45" onClick={onClose}>
+      <aside className="h-full w-full max-w-3xl overflow-auto border-l border-border bg-background p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground">Issue detail</p>
+              <SourceBadge label="Read-only" tone="muted" />
+              <SourceBadge label="Live backend detail" tone="live" />
+            </div>
+            <h2 className="mt-1 text-2xl font-semibold tracking-tight">{resolvedIssue.title}</h2>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              {resolvedIssue.identifier ? <Badge className="border-border bg-muted/40 text-muted-foreground">{resolvedIssue.identifier}</Badge> : null}
+              <Badge className={statusTone(String(resolvedIssue.status))}>{String(resolvedIssue.status)}</Badge>
+              <Badge className={priorityTone(resolvedIssue.priority)}>{resolvedIssue.priority}</Badge>
+            </div>
+          </div>
+          <Button variant="ghost" size="icon-sm" onClick={onClose}>
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+
+        <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{resolvedIssue.description || "No description provided."}</p>
+
+        <div className="mt-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
+          Cockpit stays read-only in v1. The buttons below only queue TODO activity events; they do not mutate the issue directly.
+        </div>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {READ_ONLY_ACTIONS.map((action) => (
+            <Button key={action.action} variant="outline" size="sm" disabled={actionPending} onClick={() => onAction(action.action, action.label)}>
+              {action.label}
+            </Button>
+          ))}
+        </div>
+
+        {isLoading ? (
+          <div className="mt-4 rounded-2xl border border-border bg-card p-4">
+            <div className="space-y-2">
+              <Skeleton className="h-4 w-44" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-5/6" />
+            </div>
+          </div>
+        ) : null}
+
+        {isError && errorMessage ? <div className="mt-4"><ErrorPanel title="Issue detail failed to load" body={errorMessage} onRetry={onRetry} /></div> : null}
+
+        <IssueDetailFields issue={resolvedIssue} />
+
+        <DrawerBlock title="Issue JSON">
+          <pre>{JSON.stringify(resolvedIssue, null, 2)}</pre>
+        </DrawerBlock>
+
+        <DrawerBlock title="Payload JSON">
+          <pre>{JSON.stringify(resolvedIssue.payload ?? {}, null, 2)}</pre>
+        </DrawerBlock>
+
+        <DrawerBlock title="Related Events">
+          {isLoading && !detail ? (
+            <div className="space-y-2">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-3/4" />
+            </div>
+          ) : (
+            <EventTable rows={relatedEvents} emptyTitle="No related events" emptyBody="No event rows are currently linked to this issue." />
+          )}
+        </DrawerBlock>
+
+        <DrawerBlock title="Related Routing Decisions">
+          {isLoading && !detail ? (
+            <div className="space-y-2">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+            </div>
+          ) : (
+            <RoutingTable rows={relatedRouting} emptyTitle="No routing decisions" emptyBody="No routing decisions are currently linked to this issue." />
+          )}
+        </DrawerBlock>
+      </aside>
+    </div>
+  );
+}
+
+function CockpitLoadingSkeleton() {
+  return (
+    <div className="space-y-8 pb-10">
+      <div className="rounded-3xl border border-border bg-card p-6">
+        <Skeleton className="h-5 w-40" />
+        <Skeleton className="mt-4 h-10 w-72" />
+        <Skeleton className="mt-3 h-4 w-full max-w-3xl" />
+        <div className="mt-5 grid grid-cols-3 gap-2">
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-16 w-full" />
+        </div>
+      </div>
+
+      <section className="space-y-3">
+        <Skeleton className="h-7 w-72" />
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+          {Array.from({ length: 10 }).map((_, index) => <Skeleton key={index} className="h-32 w-full rounded-2xl" />)}
+        </div>
+        <Skeleton className="h-14 w-full rounded-2xl" />
+      </section>
+
+      <section className="space-y-3">
+        <Skeleton className="h-7 w-60" />
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => <Skeleton key={index} className="h-40 w-full rounded-2xl" />)}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <Skeleton className="h-7 w-56" />
+        <Skeleton className="h-14 w-full rounded-2xl" />
+        <div className="grid gap-3 xl:grid-cols-5 2xl:grid-cols-10">
+          {Array.from({ length: 5 }).map((_, index) => <Skeleton key={index} className="h-80 w-full rounded-2xl" />)}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <Skeleton className="h-7 w-48" />
+        <Skeleton className="h-64 w-full rounded-2xl" />
+      </section>
+
+      <section className="space-y-3">
+        <Skeleton className="h-7 w-56" />
+        <Skeleton className="h-64 w-full rounded-2xl" />
+      </section>
+    </div>
+  );
 }
 
 export function Cockpit() {
   const { selectedCompanyId } = useCompany();
-  const { openNewIssue } = useDialog();
   const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
-  const [ownerFilter, setOwnerFilter] = useState<string | null>(null);
+  const [issueFilters, setIssueFilters] = useState<IssueBoardFilters>({ queue: null, owner: null });
   const [selectedIssue, setSelectedIssue] = useState<CockpitIssue | null>(null);
+
   const query = useQuery({
     queryKey: selectedCompanyId ? queryKeys.cockpit(selectedCompanyId) : ["cockpit", "none"],
     queryFn: () => cockpitApi.bootstrap(selectedCompanyId!),
     enabled: Boolean(selectedCompanyId),
   });
+
   const detailQuery = useQuery({
     queryKey: selectedCompanyId && selectedIssue ? ["cockpit", selectedCompanyId, "issue", selectedIssue.id] : ["cockpit", "issue", "none"],
     queryFn: () => cockpitApi.issueDetail(selectedCompanyId!, selectedIssue!.id),
@@ -452,90 +981,198 @@ export function Cockpit() {
   });
 
   const actionMutation = useMutation({
-    mutationFn: ({ issueId, action }: { issueId: string; action: string }) =>
-      cockpitApi.issueAction(selectedCompanyId!, issueId, action),
-    onSuccess: () => {
+    mutationFn: ({ issueId, action, label }: { issueId: string; action: string; label: string }) =>
+      cockpitApi.issueAction(selectedCompanyId!, issueId, action).then(() => ({ action, label })),
+    onSuccess: ({ action, label }) => {
       if (selectedCompanyId) {
         queryClient.invalidateQueries({ queryKey: queryKeys.cockpit(selectedCompanyId) });
         if (selectedIssue) {
           queryClient.invalidateQueries({ queryKey: ["cockpit", selectedCompanyId, "issue", selectedIssue.id] });
         }
       }
+      pushToast({
+        title: `${label} queued`,
+        body: `${action} was accepted as a TODO activity event. Cockpit did not mutate the issue directly.`,
+        tone: "info",
+      });
     },
     onError: (error) => {
-      pushToast({ title: "Action failed", body: String(error), tone: "warn" });
+      pushToast({ title: "Action failed", body: describeError(error), tone: "warn" });
     },
   });
 
   const data = query.data;
   const draftsInProgress = MOCK_DRAFTS.filter((draft) => draft.status === "Drafting").length;
   const contentPendingReview = MOCK_DRAFTS.filter((draft) => draft.status === "Needs Review").length;
-  const selectedEvents = detailQuery.data?.events ?? [];
-  const selectedRouting = detailQuery.data?.routingDecisions ?? [];
   const issueCount = data?.issues.length ?? 0;
+  const liveAgentCount = data?.agents.filter((agent) => agent.id).length ?? 0;
+  const placeholderLaneCount = (data?.agents.length ?? 0) - liveAgentCount;
 
-  const quickActions = useMemo(() => [
-    { label: "New Issue", onClick: () => openNewIssue() },
-    { label: "New Brief", onClick: () => pushToast({ title: "Brief creation is stubbed", body: "TODO: wire New Brief to a briefs backend endpoint.", tone: "info" }) },
-    { label: "New Draft", onClick: () => pushToast({ title: "Draft creation is stubbed", body: "TODO: wire New Draft to a drafts/content backend endpoint.", tone: "info" }) },
-    { label: "Review Blocked", onClick: () => scrollToSection("issue-board") },
-    { label: "Review Idle", onClick: () => scrollToSection("issue-board") },
-    { label: "Review QA Queue", onClick: () => scrollToSection("issue-board") },
-    { label: "Review Close Candidates", onClick: () => scrollToSection("issue-board") },
-    { label: "Open Event Log", onClick: () => scrollToSection("event-log") },
-    { label: "Open Routing Log", onClick: () => scrollToSection("routing-log") },
-  ], [openNewIssue, pushToast]);
+  function setQueueFilter(filterKey: IssueBoardFilterKey) {
+    setIssueFilters((current) => ({ ...current, queue: filterKey }));
+    focusSection("issue-board");
+  }
+
+  function setOwnerFilter(owner: string) {
+    setIssueFilters((current) => ({ ...current, owner }));
+    focusSection("issue-board");
+  }
+
+  function clearFilters() {
+    setIssueFilters({ queue: null, owner: null });
+  }
+
+  function handleReadOnlyAction(action: string, label: string) {
+    if (!selectedIssue || !selectedCompanyId) return;
+    actionMutation.mutate({ issueId: selectedIssue.id, action, label });
+  }
+
+  const quickActions = [
+    {
+      label: "New Issue",
+      onClick: () => pushToast({ title: "Read-only cockpit", body: "TODO: keep issue creation in the dedicated issue flow instead of mutating from Cockpit.", tone: "info" }),
+    },
+    {
+      label: "New Brief",
+      onClick: () => pushToast({ title: "Brief creation is stubbed", body: "TODO: wire New Brief to a briefs backend endpoint.", tone: "info" }),
+    },
+    {
+      label: "New Draft",
+      onClick: () => pushToast({ title: "Draft creation is stubbed", body: "TODO: wire New Draft to a drafts/content backend endpoint.", tone: "info" }),
+    },
+    { label: "Review Blocked", onClick: () => setQueueFilter("blocked") },
+    { label: "Review Idle", onClick: () => setQueueFilter("idle") },
+    { label: "Review QA Queue", onClick: () => setQueueFilter("qa") },
+    { label: "Review Close Candidates", onClick: () => setQueueFilter("close_candidates") },
+    { label: "Open Event Log", onClick: () => focusSection("event-log") },
+    { label: "Open Routing Log", onClick: () => focusSection("routing-log") },
+  ];
 
   if (!selectedCompanyId) return <EmptyState title="No company selected" body="Select a company to open the cockpit." />;
-  if (query.isLoading) return <div className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground">Loading cockpit...</div>;
-  if (query.error || !data) return <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-200">Failed to load cockpit.</div>;
-
-  function stubAction(action: string) {
-    if (selectedIssue && selectedCompanyId) {
-      actionMutation.mutate({ issueId: selectedIssue.id, action });
-    }
-    
-    pushToast({ title: `${action} queued`, body: "This is a read-only view. Your request has been queued in the event stream and will not immediately mutate the board.", tone: "info" });
+  if (query.isLoading) return <CockpitLoadingSkeleton />;
+  if (query.error || !data) {
+    return (
+      <ErrorPanel
+        title="Failed to load Cockpit"
+        body={`${query.error ? describeError(query.error) : "Cockpit bootstrap did not return data."} Retry the backend bootstrap request or verify the API server is healthy for this company.`}
+        onRetry={() => void query.refetch()}
+      />
+    );
   }
 
   return (
     <div className="space-y-8 pb-10">
       <div className="relative overflow-hidden rounded-3xl border border-border bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.22),transparent_32%),linear-gradient(135deg,rgba(15,23,42,0.92),rgba(2,6,23,0.78))] p-5 text-white shadow-xl dark:from-slate-950 md:p-6">
         <div className="relative z-10 flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div><Badge className="border-white/20 bg-white/10 text-white">Paperclip Cockpit v1</Badge><h1 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">Mission Control</h1><p className="mt-2 max-w-3xl text-sm text-white/70">Operational control plane for agent workflows, issue flow, briefs, drafts, customer activity, routing audit, and intervention queues.</p></div>
-          <div className="grid grid-cols-3 gap-2 rounded-2xl border border-white/15 bg-white/10 p-3 text-center backdrop-blur"><MiniStat label="Issues" value={issueCount} /><MiniStat label="Events" value={data.events.length} /><MiniStat label="Routes" value={data.routingDecisions.length} /></div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className="border-white/20 bg-white/10 text-white">Paperclip Cockpit v1</Badge>
+              <SourceBadge label="Dashboard source: backend bootstrap" tone="live" />
+              {placeholderLaneCount > 0 ? <SourceBadge label={`${placeholderLaneCount} placeholder lane${placeholderLaneCount === 1 ? "" : "s"}`} tone="placeholder" /> : null}
+              <SourceBadge label="Drafts / briefs: mock / adapter pending" tone="mock" />
+            </div>
+            <h1 className="mt-4 text-3xl font-semibold tracking-tight md:text-4xl">Mission Control</h1>
+            <p className="mt-2 max-w-3xl text-sm text-white/70">
+              Practical read-only operational console for issue flow, agent load, event audit, routing review, and clearly marked mock adapter surfaces.
+            </p>
+          </div>
+          <div className="grid grid-cols-3 gap-2 rounded-2xl border border-white/15 bg-white/10 p-3 text-center backdrop-blur">
+            <MiniStat label="Issues" value={issueCount} />
+            <MiniStat label="Events" value={data.events.length} />
+            <MiniStat label="Routes" value={data.routingDecisions.length} />
+          </div>
         </div>
       </div>
 
       <section className="space-y-3">
-        <SectionTitle icon={Gauge} title="Mission Control Dashboard" subtitle="Executive overview first, with fast intervention buttons." />
-        <MetricCards metrics={data.summary.metrics} draftCount={draftsInProgress} contentReviewCount={contentPendingReview} />
-        <div className="flex flex-wrap gap-2 rounded-2xl border border-border bg-card p-3">{quickActions.map((action) => <Button key={action.label} variant="outline" size="sm" onClick={action.onClick}>{action.label}<ArrowRight className="h-3 w-3" /></Button>)}</div>
+        <SectionTitle icon={Gauge} title="Mission Control Dashboard" subtitle="Executive overview first. Live issue data is filterable; mock content cards stay clearly labeled." />
+        <MetricCards
+          metrics={data.summary.metrics}
+          draftCount={draftsInProgress}
+          contentReviewCount={contentPendingReview}
+          activeFilter={issueFilters.queue}
+          onMetricSelect={setQueueFilter}
+        />
+        <div className="flex flex-wrap gap-2 rounded-2xl border border-border bg-card p-3">
+          {quickActions.map((action) => (
+            <Button key={action.label} variant="outline" size="sm" onClick={action.onClick}>
+              {action.label}
+              <ArrowRight className="h-3 w-3" />
+            </Button>
+          ))}
+        </div>
       </section>
 
       <AgentFlow agents={data.agents} onFilter={setOwnerFilter} />
-      {ownerFilter && <Button variant="ghost" size="sm" onClick={() => setOwnerFilter(null)}>Clear owner filter: {ownerFilter}</Button>}
-      <IssueFlowBoard issues={data.issues} ownerFilter={ownerFilter} onOpen={setSelectedIssue} />
+
+      <IssueFlowBoard
+        issues={data.issues}
+        filters={issueFilters}
+        onOpen={setSelectedIssue}
+        onClearFilters={clearFilters}
+        onRemoveQueueFilter={() => setIssueFilters((current) => ({ ...current, queue: null }))}
+        onRemoveOwnerFilter={() => setIssueFilters((current) => ({ ...current, owner: null }))}
+      />
 
       <section className="grid gap-6 2xl:grid-cols-2">
-        <PipelineSection id="drafts" title="Drafts Section" subtitle="Adapter-ready mock content work. TODO: bind to drafts/content tables." icon={FileText} states={DRAFT_STATES} items={MOCK_DRAFTS} renderMeta={(draft) => `${draft.owner} | ${draft.contentType} | ${ageLabel(draft.lastUpdated)}`} />
-        <PipelineSection id="briefs" title="Briefs Pipeline" subtitle="Adapter-ready mock brief flow. TODO: bind to briefs API." icon={ClipboardList} states={BRIEF_STATES} items={MOCK_BRIEFS} renderMeta={(brief) => `${brief.owner} | ${ageLabel(brief.lastUpdated)}`} />
+        <PipelineSection
+          id="drafts"
+          title="Drafts Section"
+          subtitle="Adapter-ready placeholder content work. Explicitly mock for v1 until adapter integration lands."
+          icon={FileText}
+          states={DRAFT_STATES}
+          items={MOCK_DRAFTS}
+          renderMeta={(draft) => `${draft.owner} | ${draft.contentType} | ${ageLabel(draft.lastUpdated)}`}
+        />
+        <PipelineSection
+          id="briefs"
+          title="Briefs Pipeline"
+          subtitle="Adapter-ready placeholder brief flow. Explicitly mock for v1 until briefs APIs exist."
+          icon={ClipboardList}
+          states={BRIEF_STATES}
+          items={MOCK_BRIEFS}
+          renderMeta={(brief) => `${brief.owner} | ${ageLabel(brief.lastUpdated)}`}
+        />
       </section>
 
       <div className="flex flex-wrap gap-2 rounded-2xl border border-border bg-card p-3">
-        <Button variant="outline" size="sm" onClick={() => pushToast({ title: "New Brief stub", body: "TODO: create brief endpoint and dialog.", tone: "info" })}><MessageSquarePlus className="h-4 w-4" />New Brief</Button>
-        <Button variant="outline" size="sm" onClick={() => scrollToSection("briefs")}><Clock3 className="h-4 w-4" />Review Briefs</Button>
-        <Button variant="outline" size="sm" onClick={() => pushToast({ title: "Convert Brief to Issue stub", body: "TODO: wire brief conversion to issue creation.", tone: "info" })}><CheckCircle2 className="h-4 w-4" />Convert Brief to Issue</Button>
+        <Button variant="outline" size="sm" onClick={() => pushToast({ title: "New Brief stub", body: "TODO: create brief endpoint and dialog.", tone: "info" })}>
+          <MessageSquarePlus className="h-4 w-4" />
+          New Brief
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => focusSection("briefs")}>
+          <Clock3 className="h-4 w-4" />
+          Review Briefs
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => pushToast({ title: "Convert Brief to Issue stub", body: "TODO: wire brief conversion to issue creation.", tone: "info" })}>
+          <CheckCircle2 className="h-4 w-4" />
+          Convert Brief to Issue
+        </Button>
       </div>
 
       <EventStream events={data.events} />
       <RoutingLog rows={data.routingDecisions} />
 
       <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100">
-        <div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 h-4 w-4 text-sky-400" /><p>Mutation buttons emit events to the activity stream by design. They will not immediately mutate the board state until processed by a background agent.</p></div>
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-0.5 h-4 w-4 text-sky-400" />
+          <p>
+            Live issues, events, routing decisions, and registered agents come from the company-scoped backend bootstrap. Drafts, briefs, and placeholder lanes remain explicitly mocked until their adapters exist.
+          </p>
+        </div>
       </div>
 
-      <IssueDrawer issue={selectedIssue} events={selectedEvents} routing={selectedRouting} onClose={() => setSelectedIssue(null)} onAction={stubAction} />
+      <IssueDrawer
+        issue={selectedIssue}
+        detail={detailQuery.data}
+        isLoading={detailQuery.isLoading || detailQuery.isFetching}
+        isError={detailQuery.isError}
+        errorMessage={detailQuery.error ? describeError(detailQuery.error) : null}
+        onRetry={() => void detailQuery.refetch()}
+        onClose={() => setSelectedIssue(null)}
+        onAction={handleReadOnlyAction}
+        actionPending={actionMutation.isPending}
+      />
     </div>
   );
 }

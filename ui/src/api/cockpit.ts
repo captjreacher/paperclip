@@ -28,6 +28,8 @@ export const cockpitApi = {
     api.get<CockpitEventsResponse>(`/companies/${companyId}/cockpit/issues/${encodeURIComponent(issueId)}/events`),
   issueRouting: (companyId: string, issueId: string) =>
     api.get<CockpitRoutingDecisionsResponse>(`/companies/${companyId}/cockpit/issues/${encodeURIComponent(issueId)}/routing`),
+  issueAction: (companyId: string, issueId: string, action: string, payload?: Record<string, unknown>) =>
+    api.post<void>(`/companies/${companyId}/cockpit/issues/${encodeURIComponent(issueId)}/actions`, { action, payload }),
   events: (companyId: string, filters?: { eventType?: string; issueId?: string; sourceSystem?: string; from?: string; to?: string; limit?: number }) =>
     api.get<CockpitEventsResponse>(`/companies/${companyId}/cockpit/events${qs(filters)}`),
   routingDecisions: (companyId: string, filters?: { issueId?: string; limit?: number }) =>

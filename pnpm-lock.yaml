@@ -16,6 +16,9 @@ importers:
 
   .:
     dependencies:
+      dotenv:
+        specifier: ^17.0.1
+        version: 17.4.2
       mdn-data:
         specifier: ^2.28.0
         version: 2.28.0
@@ -32,6 +35,9 @@ importers:
       shx:
         specifier: ^0.4.0
         version: 0.4.0
+      tsx:
+        specifier: ^4.19.2
+        version: 4.21.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

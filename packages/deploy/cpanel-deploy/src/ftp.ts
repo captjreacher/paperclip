@@ -1,3 +1,4 @@
+import { Client as FTPClient } from "basic-ftp"
 import { promises as fs, statSync } from "node:fs";
 import path from "node:path";
 import type { CpanelDeployConfig, CpanelDeployOptions, DeployResult } from "./index.js";
@@ -65,8 +66,7 @@ export async function deployViaFtp(
     console.log("[cpanel-deploy] Connecting via FTP/FTPS:", { ...redacted });
   }
 
-  const FTPClient = await getFtpClient();
-  const client = new (FTPClient as new () => any)();
+  const client = new FTPClient();  
   const uploaded: string[] = [];
   const skipped: string[] = [];
   const errors: Array<{ path: string; error: string }> = [];
@@ -76,13 +76,14 @@ export async function deployViaFtp(
     const secure = config.protocol === "ftps";
 
     await client.access({
-      host: config.host,
-      port,
-      user: config.user,
-      password: config.password,
-      secure,
-      secureOptions: { rejectUnauthorized: false },
-    });
+  host: config.host,
+  port: config.port,
+  user: config.user,
+  password: config.password,
+  secure: config.protocol === "ftps",
+});
+
+console.log("FTP current directory:", await client.pwd());
 
     if (verbose) {
       console.log("[cpanel-deploy] Connected to", config.host);

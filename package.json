@@ -42,11 +42,12 @@
     "deploy:cpanel:dry-run": "pnpm --filter @paperclipai/deploy-cpanel exec tsx src/cli.ts --dry-run"
   },
   "devDependencies": {
-    "@playwright/test": "^1.58.2",
+    "@playwright/test": "^1.59.1",
     "cross-env": "^10.1.0",
-    "esbuild": "^0.27.3",
-    "typescript": "^5.7.3",
-    "vitest": "^3.0.5"
+    "esbuild": "^0.27.7",
+    "shx": "^0.4.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=20"

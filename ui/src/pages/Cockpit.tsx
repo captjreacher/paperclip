@@ -491,13 +491,11 @@ export function Cockpit() {
   if (query.error || !data) return <div className="rounded-2xl border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-200">Failed to load cockpit.</div>;
 
   function stubAction(action: string) {
-    if (action === "Close Issue" && !window.confirm("Close issue action is currently stubbed. Continue to emit a toast only?")) return;
-    
     if (selectedIssue && selectedCompanyId) {
       actionMutation.mutate({ issueId: selectedIssue.id, action });
     }
     
-    pushToast({ title: `${action} queued as cockpit stub`, body: "TODO: emit a governed action/event once mutation endpoints exist.", tone: action === "Close Issue" ? "warn" : "info" });
+    pushToast({ title: `${action} queued`, body: "This is a read-only view. Your request has been queued in the event stream and will not immediately mutate the board.", tone: "info" });
   }
 
   return (
@@ -533,8 +531,8 @@ export function Cockpit() {
       <EventStream events={data.events} />
       <RoutingLog rows={data.routingDecisions} />
 
-      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
-        <div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 h-4 w-4" /><p>Mutation buttons are visible stubs by design. They show toasts and include TODOs until governed backend action/event endpoints exist.</p></div>
+      <div className="rounded-2xl border border-sky-500/30 bg-sky-500/10 p-4 text-sm text-sky-100">
+        <div className="flex items-start gap-3"><AlertTriangle className="mt-0.5 h-4 w-4 text-sky-400" /><p>Mutation buttons emit events to the activity stream by design. They will not immediately mutate the board state until processed by a background agent.</p></div>
       </div>
 
       <IssueDrawer issue={selectedIssue} events={selectedEvents} routing={selectedRouting} onClose={() => setSelectedIssue(null)} onAction={stubAction} />

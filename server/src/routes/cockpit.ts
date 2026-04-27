@@ -74,7 +74,7 @@ function toCockpitIssue(
     sourceSystem: issue.originKind ?? "manual",
     sourceRef: issue.originId ?? issue.originRunId ?? issue.identifier ?? null,
     payload: issuePayload(issue),
-  };
+  } as unknown as CockpitIssue;
 }
 
 function countIssues(issueRows: CockpitIssue[], predicate: (issue: CockpitIssue) => boolean) {
@@ -87,18 +87,18 @@ function buildMetrics(issueRows: CockpitIssue[], routingRows: CockpitRoutingDeci
   const isOpen = (issue: CockpitIssue) => OPEN_STATUSES.has(issue.status);
   const isIdle = (issue: CockpitIssue) => {
     const updatedAt = new Date(issue.updatedAt).getTime();
-    return issue.status === "idle" || ((issue.status === "backlog" || issue.status === "todo") && updatedAt < staleCutoff);
+    return (issue.status as string) === "idle" || ((issue.status === "backlog" || issue.status === "todo") && updatedAt < staleCutoff);
   };
   const awaitingBossReview = (issue: CockpitIssue) => {
     const executionState = asRecord(issue.executionState);
-    return issue.status === "boss_review" || executionState?.currentStageType === "boss_review";
+    return (issue.status as string) === "boss_review" || executionState?.currentStageType === "boss_review";
   };
 
   return [
     { key: "open", label: "Open Issues", value: countIssues(issueRows, isOpen), trendPlaceholder: "trend pending" },
     { key: "blocked", label: "Blocked", value: countIssues(issueRows, (issue) => issue.status === "blocked"), trendPlaceholder: "trend pending" },
     { key: "idle", label: "Idle", value: countIssues(issueRows, isIdle), trendPlaceholder: "trend pending" },
-    { key: "qa", label: "Awaiting QA", value: countIssues(issueRows, (issue) => issue.status === "in_review" || issue.status === "qa_review"), trendPlaceholder: "trend pending" },
+    { key: "qa", label: "Awaiting QA", value: countIssues(issueRows, (issue) => issue.status === "in_review" || (issue.status as string) === "qa_review"), trendPlaceholder: "trend pending" },
     { key: "boss", label: "Awaiting Boss Review", value: countIssues(issueRows, awaitingBossReview), trendPlaceholder: "trend pending" },
     { key: "close_candidates", label: "Auto-close Candidates", value: countIssues(issueRows, (issue) => issue.status === "done" && new Date(issue.updatedAt).getTime() < recentCutoff), trendPlaceholder: "trend pending" },
     { key: "drafts", label: "Drafts in Progress", value: 0, trendPlaceholder: "mock adapter" },

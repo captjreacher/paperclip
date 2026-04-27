@@ -127,7 +127,7 @@ function boardColumnForIssue(issue: CockpitIssue) {
   const status = String(issue.status);
   const updatedAt = new Date(issue.updatedAt).getTime();
   const idle = ["backlog", "todo"].includes(status) && updatedAt < Date.now() - 3 * 24 * 60 * 60 * 1000;
-  const executionState = issue.executionState && typeof issue.executionState === "object" ? issue.executionState as Record<string, unknown> : null;
+  const executionState = issue.executionState && typeof issue.executionState === "object" ? issue.executionState as unknown as Record<string, unknown> : null;
   if (["closed", "cancelled"].includes(status)) return "Closed";
   if (status === "done" && updatedAt < Date.now() - 7 * 24 * 60 * 60 * 1000) return "Close Candidate";
   if (status === "done") return "Done";
@@ -310,7 +310,7 @@ function PipelineSection<T extends { id: string; title: string; owner: string; s
 
 function EventStream({ events }: { events: CockpitEventRow[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [filters, setFilters] = useState({ eventType: "", issueId: "", sourceSystem: "", from: "", to: "" });
+  const [filters, setFilters] = useState<Record<string, string>>({ eventType: "", issueId: "", sourceSystem: "", from: "", to: "" });
   const filtered = events.filter((event) => {
     if (filters.eventType && !event.eventType.toLowerCase().includes(filters.eventType.toLowerCase())) return false;
     if (filters.issueId && !(event.issueId ?? "").toLowerCase().includes(filters.issueId.toLowerCase())) return false;

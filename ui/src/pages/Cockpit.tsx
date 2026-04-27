@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo, useCallback } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -10,13 +10,17 @@ import {
   ClipboardList,
   Clock3,
   FileText,
+  FilterX,
   Gauge,
   GitBranch,
   MessageSquarePlus,
   RadioTower,
   RefreshCcw,
+  Search,
   ShieldCheck,
   Sparkles,
+  ToggleLeft,
+  ToggleRight,
   X,
 } from "lucide-react";
 import type {
@@ -33,6 +37,7 @@ import { useToastActions } from "@/context/ToastContext";
 import { cockpitApi } from "@/api/cockpit";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
+import { CockpitIssueModal } from "@/components/CockpitIssueModal";
 
 type DraftState = "Drafting" | "Needs Review" | "Needs Design" | "Ready to Publish" | "Published" | "Needs Repurpose";
 type BriefState = "Intake" | "Analysis" | "Draft Brief" | "Review" | "Approved" | "Converted to Work";
@@ -60,6 +65,14 @@ interface BriefCardData {
 interface IssueBoardFilters {
   queue: IssueBoardFilterKey | null;
   owner: string | null;
+  status: string | null;
+}
+
+interface AgentFilters {
+  search: string;
+  liveOnly: boolean;
+  hasIssuesOnly: boolean;
+  blockedOnly: boolean;
 }
 
 const DRAFT_STATES: DraftState[] = ["Drafting", "Needs Review", "Needs Design", "Ready to Publish", "Published", "Needs Repurpose"];
@@ -260,6 +273,7 @@ function getFilteredIssues(issues: CockpitIssue[], filters: IssueBoardFilters) {
   return issues.filter((issue) => {
     if (filters.queue && !ISSUE_FILTER_CONFIG[filters.queue].matches(issue)) return false;
     if (filters.owner && normalizeOwner(issue.currentOwner) !== normalizeOwner(filters.owner)) return false;
+    if (filters.status && String(issue.status) !== filters.status) return false;
     return true;
   });
 }
@@ -369,56 +383,186 @@ function MetricCards({
   );
 }
 
-function AgentFlow({ agents, onFilter }: { agents: CockpitAgentOverview[]; onFilter: (owner: string) => void }) {
-  const liveAgents = agents.filter((agent) => agent.id).length;
-  const placeholderLanes = agents.length - liveAgents;
+function AgentControls({
+  filters,
+  setFilters,
+  agentCount,
+  liveCount,
+  placeholderCount,
+}: {
+  filters: AgentFilters;
+  setFilters: (filters: AgentFilters) => void;
+  agentCount: number;
+  liveCount: number;
+  placeholderCount: number;
+}) {
+  const hasActive = filters.search || filters.liveOnly || filters.hasIssuesOnly || filters.blockedOnly;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-border bg-card p-3">
+      <div className="relative">
+        <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+        <input
+          type="text"
+          value={filters.search}
+          onChange={(e) => setFilters({ ...filters, search: e.target.value })}
+          placeholder="Search agents..."
+          className="h-8 rounded-lg border border-input bg-background pl-7 pr-3 text-xs outline-none focus:border-ring"
+        />
+      </div>
+      <Button
+        variant={filters.liveOnly ? "default" : "outline"}
+        size="xs"
+        onClick={() => setFilters({ ...filters, liveOnly: !filters.liveOnly })}
+      >
+        {filters.liveOnly ? <ToggleRight className="h-3.5 w-3.5" /> : <ToggleLeft className="h-3.5 w-3.5" />}
+        Live only
+      </Button>
+      <Button
+        variant={filters.hasIssuesOnly ? "default" : "outline"}
+        size="xs"
+        onClick={() => setFilters({ ...filters, hasIssuesOnly: !filters.hasIssuesOnly })}
+      >
+        {filters.hasIssuesOnly ? <ToggleRight className="h-3.5 w-3.5" /> : <ToggleLeft className="h-3.5 w-3.5" />}
+        Has issues
+      </Button>
+      <Button
+        variant={filters.blockedOnly ? "default" : "outline"}
+        size="xs"
+        onClick={() => setFilters({ ...filters, blockedOnly: !filters.blockedOnly })}
+      >
+        {filters.blockedOnly ? <ToggleRight className="h-3.5 w-3.5" /> : <ToggleLeft className="h-3.5 w-3.5" />}
+        Blocked
+      </Button>
+      {hasActive ? (
+        <Button variant="ghost" size="xs" onClick={() => setFilters({ search: "", liveOnly: false, hasIssuesOnly: false, blockedOnly: false })}>
+          <FilterX className="h-3.5 w-3.5" />
+          Clear
+        </Button>
+      ) : null}
+      <div className="ml-auto flex gap-1.5">
+        <SourceBadge label={`${liveCount} live`} tone="live" />
+        {placeholderCount > 0 ? <SourceBadge label={`${placeholderCount} placeholder`} tone="placeholder" /> : null}
+      </div>
+    </div>
+  );
+}
+
+function SimpleAgentCard({
+  agent,
+  isSelected,
+  onClick,
+  onFilterByStatus,
+}: {
+  agent: CockpitAgentOverview;
+  isSelected: boolean;
+  onClick: () => void;
+  onFilterByStatus: (status: string, count: number) => void;
+}) {
+  const isPlaceholder = !agent.id;
+  const statusLabel = isPlaceholder ? "Placeholder" : "Live";
+  const statusTone = isPlaceholder ? "placeholder" : "live";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "w-full rounded-xl border bg-card p-3 text-left transition hover:border-primary/40 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
+        isSelected ? "border-primary bg-primary/10 ring-2 ring-primary/30" : "border-border",
+        isPlaceholder && "border-dashed border-violet-500/30 bg-violet-500/5",
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-sm font-semibold truncate">{agent.name}</span>
+            <Badge className={statusTone === "live" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border-violet-500/30 bg-violet-500/10 text-violet-200"}>
+              {statusLabel}
+            </Badge>
+          </div>
+          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{agent.role}</p>
+        </div>
+        <ArrowRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground mt-0.5" />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        <Badge className="border-blue-500/30 bg-blue-500/10 text-blue-200 text-[10px]">
+          Active: {agent.activeIssues}
+        </Badge>
+        {agent.blockedIssues > 0 ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onFilterByStatus("blocked", agent.blockedIssues); }}
+            className="rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-200 hover:bg-red-500/20"
+          >
+            Blocked: {agent.blockedIssues}
+          </button>
+        ) : null}
+        {agent.awaitingReview > 0 ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onFilterByStatus("in_review", agent.awaitingReview); }}
+            className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-200 hover:bg-sky-500/20"
+          >
+            Review: {agent.awaitingReview}
+          </button>
+        ) : null}
+      </div>
+      <p className="mt-2 text-[10px] text-muted-foreground">Last: {dateLabel(agent.lastActivityAt)}</p>
+    </button>
+  );
+}
+
+function AgentFlow({
+  agents,
+  agentFilters,
+  setAgentFilters,
+  selectedOwner,
+  onFilter,
+  onFilterByStatus,
+}: {
+  agents: CockpitAgentOverview[];
+  agentFilters: AgentFilters;
+  setAgentFilters: (filters: AgentFilters) => void;
+  selectedOwner: string | null;
+  onFilter: (owner: string) => void;
+  onFilterByStatus: (status: string, count: number) => void;
+}) {
+  const liveAgents = agents.filter((agent) => agent.id);
+  const placeholderLanes = agents.length - liveAgents.length;
+
+  const filtered = agents.filter((agent) => {
+    if (agentFilters.liveOnly && !agent.id) return false;
+    if (agentFilters.hasIssuesOnly && agent.activeIssues + agent.blockedIssues + agent.awaitingReview === 0) return false;
+    if (agentFilters.blockedOnly && agent.blockedIssues === 0) return false;
+    if (agentFilters.search && !agent.name.toLowerCase().includes(agentFilters.search.toLowerCase()) && !agent.role.toLowerCase().includes(agentFilters.search.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <section id="agent-flow" className="space-y-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <SectionTitle icon={Bot} title="Agent Flow Overview" subtitle="Workload, blocked lanes, stale ownership, and review load by operator role." />
-        <div className="flex flex-wrap gap-2">
-          <SourceBadge label={`${liveAgents} live agent${liveAgents === 1 ? "" : "s"}`} tone="live" />
-          {placeholderLanes > 0 ? <SourceBadge label={`${placeholderLanes} placeholder lane${placeholderLanes === 1 ? "" : "s"}`} tone="placeholder" /> : null}
-        </div>
+      <SectionTitle icon={Bot} title="Agent Flow Overview" subtitle="Compact agent tiles. Click to filter issues by owner." />
+      <AgentControls
+        filters={agentFilters}
+        setFilters={setAgentFilters}
+        agentCount={agents.length}
+        liveCount={liveAgents.length}
+        placeholderCount={placeholderLanes}
+      />
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+        {filtered.map((agent) => (
+          <SimpleAgentCard
+            key={`${agent.id ?? agent.name}`}
+            agent={agent}
+            isSelected={normalizeOwner(selectedOwner) === normalizeOwner(agent.name)}
+            onClick={() => onFilter(agent.name)}
+            onFilterByStatus={onFilterByStatus}
+          />
+        ))}
       </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-        {agents.map((agent) => {
-          const isPlaceholder = !agent.id;
-          return (
-            <div
-              key={`${agent.id ?? agent.name}`}
-              className={cn(
-                "rounded-2xl border bg-card p-4",
-                isPlaceholder ? "border-dashed border-violet-500/30 bg-violet-500/5" : "border-border",
-              )}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-semibold">{agent.name}</h3>
-                    <SourceBadge label={isPlaceholder ? "Placeholder lane" : "Live agent"} tone={isPlaceholder ? "placeholder" : "live"} />
-                  </div>
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">{agent.role}</p>
-                </div>
-                <Button variant="outline" size="xs" onClick={() => onFilter(agent.name)}>
-                  Filter issues
-                </Button>
-              </div>
-              <div className="mt-4 grid grid-cols-4 gap-2 text-center text-xs">
-                <MiniStat label="Active" value={agent.activeIssues} />
-                <MiniStat label="Blocked" value={agent.blockedIssues} tone="text-red-300" />
-                <MiniStat label="Idle" value={agent.idleIssues} tone="text-amber-300" />
-                <MiniStat label="Review" value={agent.awaitingReview} tone="text-sky-300" />
-              </div>
-              <p className="mt-4 text-xs text-muted-foreground">
-                Last activity: {dateLabel(agent.lastActivityAt)}
-                {isPlaceholder ? " · Derived from issue ownership, not a registered agent record." : ""}
-              </p>
-            </div>
-          );
-        })}
-      </div>
+      {filtered.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-border p-4 text-center text-xs text-muted-foreground">No agents match the current filters.</p>
+      ) : null}
     </section>
   );
 }
@@ -444,33 +588,28 @@ function SectionTitle({ icon: Icon, title, subtitle }: { icon: ComponentType<{ c
   );
 }
 
-function IssueCard({ issue, onOpen }: { issue: CockpitIssue; onOpen: (issue: CockpitIssue) => void }) {
+function IssueCard({ issue, onClick }: { issue: CockpitIssue; onClick: (issue: CockpitIssue) => void }) {
   return (
     <button
       type="button"
-      onClick={() => onOpen(issue)}
+      onClick={() => onClick(issue)}
       className="w-full rounded-xl border border-border bg-background/70 p-3 text-left transition hover:border-primary/50 hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
       aria-label={`Open issue ${issue.title}`}
     >
       <div className="flex items-start justify-between gap-2">
-        <div>
+        <div className="min-w-0">
           <h4 className="line-clamp-2 text-sm font-medium leading-snug">{issue.title}</h4>
           {issue.identifier ? <p className="mt-1 font-mono text-[11px] text-muted-foreground">{issue.identifier}</p> : null}
         </div>
         {payloadExists(issue) ? <span title="Payload available" className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-primary" /> : null}
       </div>
-      <div className="mt-3 flex flex-wrap gap-1.5">
+      <div className="mt-2 flex flex-wrap gap-1">
         <Badge className={priorityTone(issue.priority)}>{issue.priority}</Badge>
         <Badge className={statusTone(String(issue.status))}>{String(issue.status)}</Badge>
       </div>
-      <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
-        <span>Owner: {issue.currentOwner ?? "Unassigned"}</span>
-        <span>Source: {issue.sourceSystem ?? "unknown"}</span>
-        <span>Updated {ageLabel(issue.updatedAt)}</span>
-      </div>
-      <div className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary">
-        Open issue detail
-        <ArrowRight className="h-3 w-3" />
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+        <span>{issue.currentOwner ?? "Unassigned"}</span>
+        <span>{dateLabel(issue.updatedAt)}</span>
       </div>
     </button>
   );
@@ -492,23 +631,26 @@ function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }
 function IssueFlowBoard({
   issues,
   filters,
-  onOpen,
+  onCardClick,
   onClearFilters,
   onRemoveQueueFilter,
   onRemoveOwnerFilter,
+  onRemoveStatusFilter,
 }: {
   issues: CockpitIssue[];
   filters: IssueBoardFilters;
-  onOpen: (issue: CockpitIssue) => void;
+  onCardClick: (issue: CockpitIssue) => void;
   onClearFilters: () => void;
   onRemoveQueueFilter: () => void;
   onRemoveOwnerFilter: () => void;
+  onRemoveStatusFilter: () => void;
 }) {
   const filtered = getFilteredIssues(issues, filters);
-  const hasFilters = Boolean(filters.queue || filters.owner);
+  const hasFilters = Boolean(filters.queue || filters.owner || filters.status);
   const subtitleBits = [
     filters.queue ? ISSUE_FILTER_CONFIG[filters.queue].label : null,
     filters.owner ? `Owner: ${filters.owner}` : null,
+    filters.status ? `Status: ${filters.status}` : null,
   ].filter(Boolean);
 
   return (
@@ -528,6 +670,7 @@ function IssueFlowBoard({
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Active filters</span>
           {filters.queue ? <FilterChip label={ISSUE_FILTER_CONFIG[filters.queue].label} onRemove={onRemoveQueueFilter} /> : null}
           {filters.owner ? <FilterChip label={`Owner: ${filters.owner}`} onRemove={onRemoveOwnerFilter} /> : null}
+          {filters.status ? <FilterChip label={`Status: ${filters.status}`} onRemove={onRemoveStatusFilter} /> : null}
           <Button variant="ghost" size="sm" onClick={onClearFilters}>
             Clear filters
           </Button>
@@ -549,7 +692,7 @@ function IssueFlowBoard({
                 </div>
                 <div className="space-y-2">
                   {columnIssues.length > 0 ? (
-                    columnIssues.map((issue) => <IssueCard key={issue.id} issue={issue} onOpen={onOpen} />)
+                    columnIssues.map((issue) => <IssueCard key={issue.id} issue={issue} onClick={onCardClick} />)
                   ) : (
                     <p className="rounded-xl border border-dashed border-border p-3 text-xs text-muted-foreground">No issues in this lane</p>
                   )}
@@ -756,160 +899,7 @@ function RoutingTable({ rows, emptyTitle, emptyBody }: { rows: CockpitRoutingDec
   );
 }
 
-function DrawerBlock({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <div className="mt-6 space-y-2">
-      <h3 className="font-semibold">{title}</h3>
-      <div className="overflow-auto rounded-2xl border border-border bg-card p-3 text-xs">{children}</div>
-    </div>
-  );
-}
-
-function IssueDetailFields({ issue }: { issue: CockpitIssue }) {
-  const fields = [
-    ["Issue ID", issue.id],
-    ["Identifier", issue.identifier ?? "-"],
-    ["Status", String(issue.status)],
-    ["Priority", issue.priority],
-    ["Current owner", issue.currentOwner ?? "Unassigned"],
-    ["Assignee agent", issue.assigneeAgentId ?? "-"],
-    ["Assignee user", issue.assigneeUserId ?? "-"],
-    ["Source system", issue.sourceSystem ?? "-"],
-    ["Source ref", issue.sourceRef ?? "-"],
-    ["Issue number", issue.issueNumber ?? "-"],
-    ["Project ID", issue.projectId ?? "-"],
-    ["Goal ID", issue.goalId ?? "-"],
-    ["Request depth", issue.requestDepth],
-    ["Created", dateLabel(issue.createdAt)],
-    ["Updated", dateLabel(issue.updatedAt)],
-    ["Started", dateLabel(issue.startedAt)],
-    ["Completed", dateLabel(issue.completedAt)],
-    ["Cancelled", dateLabel(issue.cancelledAt)],
-  ] as const;
-
-  return (
-    <div className="mt-5 grid gap-2 sm:grid-cols-2">
-      {fields.map(([label, value]) => (
-        <div key={label} className="rounded-xl border border-border bg-card p-3">
-          <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
-          <p className="mt-1 break-all text-sm font-medium">{String(value ?? "-")}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function IssueDrawer({
-  issue,
-  detail,
-  isLoading,
-  isError,
-  errorMessage,
-  onRetry,
-  onClose,
-  onAction,
-  actionPending,
-}: {
-  issue: CockpitIssue | null;
-  detail: CockpitIssueDetail | undefined;
-  isLoading: boolean;
-  isError: boolean;
-  errorMessage: string | null;
-  onRetry: () => void;
-  onClose: () => void;
-  onAction: (action: string, label: string) => void;
-  actionPending: boolean;
-}) {
-  if (!issue) return null;
-
-  const resolvedIssue = detail?.issue ?? issue;
-  const relatedEvents = detail?.events ?? [];
-  const relatedRouting = detail?.routingDecisions ?? [];
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/45" onClick={onClose}>
-      <aside className="h-full w-full max-w-3xl overflow-auto border-l border-border bg-background p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Issue detail</p>
-              <SourceBadge label="Read-only" tone="muted" />
-              <SourceBadge label="Live backend detail" tone="live" />
-            </div>
-            <h2 className="mt-1 text-2xl font-semibold tracking-tight">{resolvedIssue.title}</h2>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {resolvedIssue.identifier ? <Badge className="border-border bg-muted/40 text-muted-foreground">{resolvedIssue.identifier}</Badge> : null}
-              <Badge className={statusTone(String(resolvedIssue.status))}>{String(resolvedIssue.status)}</Badge>
-              <Badge className={priorityTone(resolvedIssue.priority)}>{resolvedIssue.priority}</Badge>
-            </div>
-          </div>
-          <Button variant="ghost" size="icon-sm" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-
-        <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{resolvedIssue.description || "No description provided."}</p>
-
-        <div className="mt-5 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
-          Cockpit stays read-only in v1. The buttons below only queue TODO activity events; they do not mutate the issue directly.
-        </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          {READ_ONLY_ACTIONS.map((action) => (
-            <Button key={action.action} variant="outline" size="sm" disabled={actionPending} onClick={() => onAction(action.action, action.label)}>
-              {action.label}
-            </Button>
-          ))}
-        </div>
-
-        {isLoading ? (
-          <div className="mt-4 rounded-2xl border border-border bg-card p-4">
-            <div className="space-y-2">
-              <Skeleton className="h-4 w-44" />
-              <Skeleton className="h-4 w-full" />
-              <Skeleton className="h-4 w-5/6" />
-            </div>
-          </div>
-        ) : null}
-
-        {isError && errorMessage ? <div className="mt-4"><ErrorPanel title="Issue detail failed to load" body={errorMessage} onRetry={onRetry} /></div> : null}
-
-        <IssueDetailFields issue={resolvedIssue} />
-
-        <DrawerBlock title="Issue JSON">
-          <pre>{JSON.stringify(resolvedIssue, null, 2)}</pre>
-        </DrawerBlock>
-
-        <DrawerBlock title="Payload JSON">
-          <pre>{JSON.stringify(resolvedIssue.payload ?? {}, null, 2)}</pre>
-        </DrawerBlock>
-
-        <DrawerBlock title="Related Events">
-          {isLoading && !detail ? (
-            <div className="space-y-2">
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-3/4" />
-            </div>
-          ) : (
-            <EventTable rows={relatedEvents} emptyTitle="No related events" emptyBody="No event rows are currently linked to this issue." />
-          )}
-        </DrawerBlock>
-
-        <DrawerBlock title="Related Routing Decisions">
-          {isLoading && !detail ? (
-            <div className="space-y-2">
-              <Skeleton className="h-10 w-full" />
-              <Skeleton className="h-10 w-full" />
-            </div>
-          ) : (
-            <RoutingTable rows={relatedRouting} emptyTitle="No routing decisions" emptyBody="No routing decisions are currently linked to this issue." />
-          )}
-        </DrawerBlock>
-      </aside>
-    </div>
-  );
-}
+// IssueDrawer, IssueDetailFields, and DrawerBlock removed - replaced by CockpitIssueModal
 
 function CockpitLoadingSkeleton() {
   return (
@@ -965,7 +955,8 @@ export function Cockpit() {
   const { selectedCompanyId } = useCompany();
   const { pushToast } = useToastActions();
   const queryClient = useQueryClient();
-  const [issueFilters, setIssueFilters] = useState<IssueBoardFilters>({ queue: null, owner: null });
+  const [issueFilters, setIssueFilters] = useState<IssueBoardFilters>({ queue: null, owner: null, status: null });
+  const [agentFilters, setAgentFilters] = useState<AgentFilters>({ search: "", liveOnly: false, hasIssuesOnly: false, blockedOnly: false });
   const [selectedIssue, setSelectedIssue] = useState<CockpitIssue | null>(null);
 
   const query = useQuery({
@@ -1008,18 +999,39 @@ export function Cockpit() {
   const liveAgentCount = data?.agents.filter((agent) => agent.id).length ?? 0;
   const placeholderLaneCount = (data?.agents.length ?? 0) - liveAgentCount;
 
+  const filteredIssues = useMemo(() => {
+    return data ? getFilteredIssues(data.issues, issueFilters) : [];
+  }, [data, issueFilters]);
+
   function setQueueFilter(filterKey: IssueBoardFilterKey) {
-    setIssueFilters((current) => ({ ...current, queue: filterKey }));
+    setIssueFilters((current) => ({ ...current, queue: filterKey, status: null }));
     focusSection("issue-board");
   }
 
   function setOwnerFilter(owner: string) {
-    setIssueFilters((current) => ({ ...current, owner }));
+    setIssueFilters((current) => ({ ...current, owner, queue: null, status: null }));
+    focusSection("issue-board");
+  }
+
+  function setStatusFilter(status: string) {
+    setIssueFilters((current) => ({ ...current, status, queue: null }));
     focusSection("issue-board");
   }
 
   function clearFilters() {
-    setIssueFilters({ queue: null, owner: null });
+    setIssueFilters({ queue: null, owner: null, status: null });
+  }
+
+  function handleIssueClick(issue: CockpitIssue) {
+    setSelectedIssue(issue);
+  }
+
+  function handleCloseModal() {
+    setSelectedIssue(null);
+  }
+
+  function handleNavigateIssue(issue: CockpitIssue) {
+    setSelectedIssue(issue);
   }
 
   function handleReadOnlyAction(action: string, label: string) {
@@ -1103,15 +1115,23 @@ export function Cockpit() {
         </div>
       </section>
 
-      <AgentFlow agents={data.agents} onFilter={setOwnerFilter} />
+      <AgentFlow
+        agents={data.agents}
+        agentFilters={agentFilters}
+        setAgentFilters={setAgentFilters}
+        selectedOwner={issueFilters.owner}
+        onFilter={setOwnerFilter}
+        onFilterByStatus={setStatusFilter}
+      />
 
       <IssueFlowBoard
         issues={data.issues}
         filters={issueFilters}
-        onOpen={setSelectedIssue}
+        onCardClick={handleIssueClick}
         onClearFilters={clearFilters}
         onRemoveQueueFilter={() => setIssueFilters((current) => ({ ...current, queue: null }))}
         onRemoveOwnerFilter={() => setIssueFilters((current) => ({ ...current, owner: null }))}
+        onRemoveStatusFilter={() => setIssueFilters((current) => ({ ...current, status: null }))}
       />
 
       <section className="grid gap-6 2xl:grid-cols-2">
@@ -1162,17 +1182,21 @@ export function Cockpit() {
         </div>
       </div>
 
-      <IssueDrawer
-        issue={selectedIssue}
-        detail={detailQuery.data}
-        isLoading={detailQuery.isLoading || detailQuery.isFetching}
-        isError={detailQuery.isError}
-        errorMessage={detailQuery.error ? describeError(detailQuery.error) : null}
-        onRetry={() => void detailQuery.refetch()}
-        onClose={() => setSelectedIssue(null)}
-        onAction={handleReadOnlyAction}
-        actionPending={actionMutation.isPending}
-      />
+      {selectedIssue ? (
+        <CockpitIssueModal
+          issue={selectedIssue}
+          detail={detailQuery.data}
+          isLoading={detailQuery.isLoading || detailQuery.isFetching}
+          isError={detailQuery.isError}
+          errorMessage={detailQuery.error ? describeError(detailQuery.error) : null}
+          allIssues={filteredIssues}
+          onClose={handleCloseModal}
+          onNavigate={handleNavigateIssue}
+          onRetry={() => void detailQuery.refetch()}
+          onAction={handleReadOnlyAction}
+          actionPending={actionMutation.isPending}
+        />
+      ) : null}
     </div>
   );
 }

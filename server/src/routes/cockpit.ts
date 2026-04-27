@@ -15,7 +15,10 @@ import type {
   CockpitMetric,
   CockpitRoutingDecisionRow,
 } from "@paperclipai/shared";
-import { assertCompanyAccess } from "./authz.js";
+import { z } from "zod";
+import { assertCompanyAccess, getActorInfo } from "./authz.js";
+import { validate } from "../middleware/validate.js";
+import { activityService } from "../services/activity.js";
 
 const AGENT_FLOW_NAMES = [
   "CEO",
@@ -384,6 +387,50 @@ export function cockpitRoutes(db: Db) {
       rawAgents,
     });
   });
+
+  const cockpitActionSchema = z.object({
+    action: z.string().min(1),
+    payload: z.record(z.unknown()).optional().nullable(),
+  });
+
+  router.post(
+    "/companies/:companyId/cockpit/issues/:issueId/actions",
+    validate(cockpitActionSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      const issueId = req.params.issueId as string;
+      assertCompanyAccess(req, companyId);
+      
+      const issueRows = await db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
+        .limit(1);
+        
+      if (issueRows.length === 0) {
+        res.status(404).json({ error: "Issue not found" });
+        return;
+      }
+
+      const { action, payload } = req.body;
+      const actorInfo = getActorInfo(req);
+      
+      // TODO: Actual state mutation or pub-sub emission logic for Cockpit events goes here.
+      // Currently, Cockpit UI is read-only. We rely entirely on this ingest event.
+      await activityService(db).create({
+        companyId,
+        actorType: actorInfo.actorType,
+        actorId: actorInfo.actorId,
+        agentId: actorInfo.agentId,
+        action,
+        entityType: "issue",
+        entityId: issueId,
+        details: payload ?? null,
+      });
+      
+      res.status(202).send();
+    }
+  );
 
   return router;
 }

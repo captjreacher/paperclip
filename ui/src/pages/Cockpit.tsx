@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type { ComponentType, ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowRight,
@@ -437,6 +437,7 @@ export function Cockpit() {
   const { selectedCompanyId } = useCompany();
   const { openNewIssue } = useDialog();
   const { pushToast } = useToastActions();
+  const queryClient = useQueryClient();
   const [ownerFilter, setOwnerFilter] = useState<string | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<CockpitIssue | null>(null);
   const query = useQuery({
@@ -448,6 +449,22 @@ export function Cockpit() {
     queryKey: selectedCompanyId && selectedIssue ? ["cockpit", selectedCompanyId, "issue", selectedIssue.id] : ["cockpit", "issue", "none"],
     queryFn: () => cockpitApi.issueDetail(selectedCompanyId!, selectedIssue!.id),
     enabled: Boolean(selectedCompanyId && selectedIssue),
+  });
+
+  const actionMutation = useMutation({
+    mutationFn: ({ issueId, action }: { issueId: string; action: string }) =>
+      cockpitApi.issueAction(selectedCompanyId!, issueId, action),
+    onSuccess: () => {
+      if (selectedCompanyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.cockpit(selectedCompanyId) });
+        if (selectedIssue) {
+          queryClient.invalidateQueries({ queryKey: ["cockpit", selectedCompanyId, "issue", selectedIssue.id] });
+        }
+      }
+    },
+    onError: (error) => {
+      pushToast({ title: "Action failed", body: String(error), tone: "warn" });
+    },
   });
 
   const data = query.data;
@@ -475,6 +492,11 @@ export function Cockpit() {
 
   function stubAction(action: string) {
     if (action === "Close Issue" && !window.confirm("Close issue action is currently stubbed. Continue to emit a toast only?")) return;
+    
+    if (selectedIssue && selectedCompanyId) {
+      actionMutation.mutate({ issueId: selectedIssue.id, action });
+    }
+    
     pushToast({ title: `${action} queued as cockpit stub`, body: "TODO: emit a governed action/event once mutation endpoints exist.", tone: action === "Close Issue" ? "warn" : "info" });
   }
 

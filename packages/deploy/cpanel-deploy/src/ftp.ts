@@ -1,4 +1,9 @@
-import { Client as FTPClient } from "basic-ftp"
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const basicFtp = require("basic-ftp") as any;
+const FtpClient = basicFtp.Client ?? basicFtp.default ?? basicFtp;
+
 import { promises as fs, statSync } from "node:fs";
 import path from "node:path";
 import type { CpanelDeployConfig, CpanelDeployOptions, DeployResult } from "./index.js";
@@ -66,7 +71,7 @@ export async function deployViaFtp(
     console.log("[cpanel-deploy] Connecting via FTP/FTPS:", { ...redacted });
   }
 
-  const client = new FTPClient();  
+ const client = new FtpClient();  
   const uploaded: string[] = [];
   const skipped: string[] = [];
   const errors: Array<{ path: string; error: string }> = [];

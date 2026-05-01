@@ -119,6 +119,138 @@ describe("plugin install and upgrade authz", () => {
     expect(mockLifecycle.load).toHaveBeenCalledWith(pluginId);
   }, 20_000);
 
+  it("auto-detects Windows local paths for admin installs", async () => {
+    const pluginId = "11111111-1111-4111-8111-111111111111";
+    const pluginKey = "paperclip.example";
+    const discovered = {
+      manifest: {
+        id: pluginKey,
+      },
+    };
+
+    mockRegistry.getByKey.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockLifecycle.load.mockResolvedValue(undefined);
+
+    const { app, loader } = await createApp(
+      {
+        type: "board",
+        userId: "admin-1",
+        source: "session",
+        isInstanceAdmin: true,
+        companyIds: [],
+      },
+      { installPlugin: vi.fn().mockResolvedValue(discovered) },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/install")
+      .send({ packageName: "C:\\plugins\\paperclip-example" });
+
+    expect(res.status).toBe(200);
+    expect(loader.installPlugin).toHaveBeenCalledWith({
+      localPath: "C:\\plugins\\paperclip-example",
+    });
+  }, 20_000);
+
+  it("still treats Windows paths as local when isLocalPath=false is provided", async () => {
+    const pluginId = "11111111-1111-4111-8111-111111111111";
+    const pluginKey = "paperclip.example";
+    const discovered = {
+      manifest: {
+        id: pluginKey,
+      },
+    };
+
+    mockRegistry.getByKey.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockLifecycle.load.mockResolvedValue(undefined);
+
+    const { app, loader } = await createApp(
+      {
+        type: "board",
+        userId: "admin-1",
+        source: "session",
+        isInstanceAdmin: true,
+        companyIds: [],
+      },
+      { installPlugin: vi.fn().mockResolvedValue(discovered) },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/install")
+      .send({ packageName: "C:\\plugins\\paperclip-example", isLocalPath: false });
+
+    expect(res.status).toBe(200);
+    expect(loader.installPlugin).toHaveBeenCalledWith({
+      localPath: "C:\\plugins\\paperclip-example",
+    });
+  }, 20_000);
+
+  it("auto-detects file: specifiers for admin installs", async () => {
+    const pluginId = "11111111-1111-4111-8111-111111111111";
+    const pluginKey = "paperclip.example";
+    const discovered = {
+      manifest: {
+        id: pluginKey,
+      },
+    };
+
+    mockRegistry.getByKey.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey,
+      packageName: "paperclip-plugin-example",
+      version: "1.0.0",
+    });
+    mockLifecycle.load.mockResolvedValue(undefined);
+
+    const { app, loader } = await createApp(
+      {
+        type: "board",
+        userId: "admin-1",
+        source: "session",
+        isInstanceAdmin: true,
+        companyIds: [],
+      },
+      { installPlugin: vi.fn().mockResolvedValue(discovered) },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/install")
+      .send({ packageName: "file:./plugins/paperclip-example" });
+
+    expect(res.status).toBe(200);
+    expect(loader.installPlugin).toHaveBeenCalledWith({
+      localPath: "./plugins/paperclip-example",
+    });
+  }, 20_000);
+
   it("rejects plugin upgrades for non-admin board users", async () => {
     const pluginId = "11111111-1111-4111-8111-111111111111";
     const { app } = await createApp({

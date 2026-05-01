@@ -1,101 +1,420 @@
+````md
+# SKILL.md — Create and Install Custom Paperclip Plugins
+
+## Purpose
+
+Create, validate, build, install, and activate custom Paperclip plugins in a local development environment.
+
+This skill is used when adding new plugin capabilities such as file tools, UI extensions, automation hooks, workspace tools, webhooks, or agent-accessible functions.
+
 ---
-name: paperclip-create-plugin
-description: >
-  Create new Paperclip plugins with the current alpha SDK/runtime. Use when
-  scaffolding a plugin package, adding a new example plugin, or updating plugin
-  authoring docs. Covers the supported worker/UI surface, route conventions,
-  scaffold flow, and verification steps.
+
+## When to use this skill
+
+Use this skill when:
+
+- Creating a new Paperclip plugin
+- Updating an existing plugin manifest
+- Registering agent tools
+- Installing a local plugin into a Paperclip instance
+- Debugging plugin activation failures
+- Fixing Windows-specific local plugin issues
+
 ---
 
-# Create a Paperclip Plugin
+## Core assumptions
 
-Use this skill when the task is to create, scaffold, or document a Paperclip plugin.
+- Repo root is:
 
-## 1. Ground rules
+```powershell
+C:\dev_local\paperclip
+````
 
-Read these first when needed:
+* Paperclip is run through pnpm:
 
-1. `doc/plugins/PLUGIN_AUTHORING_GUIDE.md`
-2. `packages/plugins/sdk/README.md`
-3. `doc/plugins/PLUGIN_SPEC.md` only for future-looking context
-
-Current runtime assumptions:
-
-- plugin workers are trusted code
-- plugin UI is trusted same-origin host code
-- worker APIs are capability-gated
-- plugin UI is not sandboxed by manifest capabilities
-- no host-provided shared plugin UI component kit yet
-- `ctx.assets` is not supported in the current runtime
-
-## 2. Preferred workflow
-
-Use the scaffold package instead of hand-writing the boilerplate:
-
-```bash
-pnpm --filter @paperclipai/create-paperclip-plugin build
-node packages/plugins/create-paperclip-plugin/dist/index.js <npm-package-name> --output <target-dir>
+```powershell
+pnpm paperclipai run
 ```
 
-For a plugin that lives outside the Paperclip repo, pass `--sdk-path` and let the scaffold snapshot the local SDK/shared packages into `.paperclip-sdk/`:
+* Local API usually runs on:
 
-```bash
-pnpm --filter @paperclipai/create-paperclip-plugin build
-node packages/plugins/create-paperclip-plugin/dist/index.js @acme/plugin-name \
-  --output /absolute/path/to/plugin-repos \
-  --sdk-path /absolute/path/to/paperclip/packages/plugins/sdk
+```text
+http://127.0.0.1:3101
 ```
 
-Recommended target inside this repo:
+* Plugins live under:
 
-- `packages/plugins/examples/` for example plugins
-- another `packages/plugins/<name>/` folder if it is becoming a real package
-
-## 3. After scaffolding
-
-Check and adjust:
-
-- `src/manifest.ts`
-- `src/worker.ts`
-- `src/ui/index.tsx`
-- `tests/plugin.spec.ts`
-- `package.json`
-
-Make sure the plugin:
-
-- declares only supported capabilities
-- does not use `ctx.assets`
-- does not import host UI component stubs
-- keeps UI self-contained
-- uses `routePath` only on `page` slots
-- is installed into Paperclip from an absolute local path during development
-
-## 4. If the plugin should appear in the app
-
-For bundled example/discoverable behavior, update the relevant host wiring:
-
-- bundled example list in `server/src/routes/plugins.ts`
-- any docs that list in-repo examples
-
-Only do this if the user wants the plugin surfaced as a bundled example.
-
-## 5. Verification
-
-Always run:
-
-```bash
-pnpm --filter <plugin-package> typecheck
-pnpm --filter <plugin-package> test
-pnpm --filter <plugin-package> build
+```text
+packages/plugins/
 ```
 
-If you changed SDK/host/plugin runtime code too, also run broader repo checks as appropriate.
+---
 
-## 6. Documentation expectations
+## Required plugin structure
 
-When authoring or updating plugin docs:
+A custom plugin should normally include:
 
-- distinguish current implementation from future spec ideas
-- be explicit about the trusted-code model
-- do not promise host UI components or asset APIs
-- prefer npm-package deployment guidance over repo-local workflows for production
+```text
+packages/plugins/<plugin-name>/
+  package.json
+  tsconfig.json
+  src/
+    index.ts
+    manifest.ts
+    worker.ts
+  dist/
+    index.js
+    manifest.js
+    worker.js
+```
+
+---
+
+## Required package.json shape
+
+Use built output, not source files, for package exports.
+
+```json
+{
+  "name": "@paperclipai/plugin-example",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0"
+  }
+}
+```
+
+---
+
+## Required manifest shape
+
+`src/manifest.ts` must use the current Paperclip plugin schema.
+
+```ts
+export default {
+  id: "example-plugin",
+  apiVersion: 1,
+  displayName: "Example Plugin",
+  author: "Paperclip",
+  version: "0.1.0",
+  description: "Example plugin for Paperclip.",
+
+  categories: ["workspace"],
+
+  capabilities: [
+    "agent.tools.register",
+    "plugin.state.read",
+    "plugin.state.write"
+  ],
+
+  entrypoints: {
+    worker: "./dist/worker.js"
+  },
+
+  tools: [
+    {
+      name: "example_tool",
+      displayName: "Example Tool",
+      description: "Example agent-accessible tool.",
+      parametersSchema: {
+        type: "object",
+        properties: {}
+      }
+    }
+  ]
+};
+```
+
+Valid categories are:
+
+```text
+connector
+workspace
+automation
+ui
+```
+
+Do not use old categories such as:
+
+```text
+developer-tools
+agent-tools
+```
+
+Capabilities must be strings, not objects.
+
+---
+
+## Required index export
+
+`src/index.ts` must default-export the manifest.
+
+```ts
+import manifest from "./manifest.js";
+
+export default manifest;
+```
+
+This is required because the plugin loader expects the plugin package default export to resolve to the manifest.
+
+---
+
+## Required worker structure
+
+The worker must start a long-running Plugin SDK process.
+
+Do not export loose functions only. If the file executes and exits normally, Paperclip activation will fail because the worker process terminates.
+
+Use:
+
+```ts
+import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+
+const plugin = definePlugin((ctx) => {
+  ctx.tools.register("example_tool", async () => {
+    return {
+      ok: true,
+      message: "Example tool executed"
+    };
+  });
+});
+
+runWorker(plugin);
+```
+
+Key rule:
+
+> A plugin worker must call `runWorker(...)` and stay alive.
+
+---
+
+## Build process
+
+From repo root:
+
+```powershell
+cd C:\dev_local\paperclip
+
+Remove-Item .\packages\plugins\<plugin-name>\dist -Recurse -Force -ErrorAction SilentlyContinue
+
+pnpm --filter @paperclipai/plugin-<plugin-name> build
+```
+
+Verify output:
+
+```powershell
+Get-Content .\packages\plugins\<plugin-name>\dist\index.js
+Get-Content .\packages\plugins\<plugin-name>\dist\manifest.js
+Get-Content .\packages\plugins\<plugin-name>\dist\worker.js
+```
+
+Expected:
+
+* `dist/index.js` default-exports manifest
+* `dist/manifest.js` has `id`, `apiVersion`, `displayName`, `author`, `entrypoints`
+* `dist/worker.js` calls SDK worker logic
+
+---
+
+## Install process
+
+Start Paperclip in one terminal:
+
+```powershell
+cd C:\dev_local\paperclip
+pnpm paperclipai run
+```
+
+In a second terminal:
+
+```powershell
+cd C:\dev_local\paperclip
+$env:PAPERCLIP_API_URL="http://127.0.0.1:3101"
+
+curl.exe http://127.0.0.1:3101/api/health
+
+pnpm paperclipai plugin install .\packages\plugins\<plugin-name>
+
+pnpm paperclipai plugin list
+```
+
+Expected result:
+
+```text
+status=ready
+```
+
+---
+
+## Windows-specific fixes
+
+### 1. tsx loader must use file URL
+
+In `server/src/services/plugin-loader.ts`, Windows may fail with:
+
+```text
+ERR_UNSUPPORTED_ESM_URL_SCHEME
+Received protocol 'c:'
+```
+
+Fix:
+
+```ts
+import { pathToFileURL } from "node:url";
+```
+
+Then:
+
+```ts
+workerOptions.execArgv = ["--import", pathToFileURL(DEV_TSX_LOADER_PATH).href];
+```
+
+### 2. Avoid raw Windows paths in Node ESM imports
+
+If dynamically importing filesystem paths, convert with:
+
+```ts
+import { pathToFileURL } from "node:url";
+
+await import(pathToFileURL(filePath).href);
+```
+
+---
+
+## Common failure modes
+
+### API unreachable
+
+Error:
+
+```text
+Could not reach the Paperclip API
+```
+
+Check:
+
+```powershell
+curl.exe http://127.0.0.1:3101/api/health
+```
+
+If it fails, restart:
+
+```powershell
+pnpm paperclipai run
+```
+
+---
+
+### Invalid manifest
+
+Error:
+
+```text
+id: Required
+apiVersion: Invalid literal value, expected 1
+displayName: Required
+author: Required
+entrypoints: Required
+```
+
+Cause:
+
+* Loader is reading the wrong export
+* `src/index.ts` does not default-export manifest
+* `package.json` exports source instead of dist
+* manifest uses old schema
+
+Fix:
+
+```ts
+import manifest from "./manifest.js";
+export default manifest;
+```
+
+And:
+
+```json
+"exports": {
+  ".": "./dist/index.js"
+}
+```
+
+---
+
+### Worker exits immediately
+
+Error:
+
+```text
+Worker initialize failed
+Worker process exited (code=0)
+```
+
+Cause:
+
+* `src/worker.ts` exported functions but did not start the SDK worker
+
+Fix:
+
+```ts
+import { definePlugin, runWorker } from "@paperclipai/plugin-sdk";
+
+const plugin = definePlugin((ctx) => {
+  ctx.tools.register("tool_name", async () => {
+    return { ok: true };
+  });
+});
+
+runWorker(plugin);
+```
+
+---
+
+### Plugin already installed
+
+If plugin is installed but broken:
+
+```powershell
+pnpm paperclipai plugin list
+```
+
+Uninstall using the exact key shown:
+
+```powershell
+pnpm paperclipai plugin uninstall <plugin-key>
+```
+
+Do not uninstall a plugin key that does not appear in the list.
+
+---
+
+## Acceptance criteria
+
+A custom plugin is complete when:
+
+* Build succeeds
+* Install succeeds
+* `pnpm paperclipai plugin list` shows `status=ready`
+* Plugin appears in the UI
+* Declared tools are registered
+* Worker remains running
+* No Windows ESM path errors occur
+
+```
+```

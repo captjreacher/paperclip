@@ -25,6 +25,7 @@ import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRa
 import { PageSkeleton } from "../components/PageSkeleton";
 import type { Agent, Issue } from "@paperclipai/shared";
 import { PluginSlotOutlet } from "@/plugins/slots";
+import { QuickIssueButton } from "@/components/QuickIssueButton";
 
 const DASHBOARD_HEARTBEAT_RUN_LIMIT = 100;
 
@@ -190,6 +191,14 @@ export function Dashboard() {
   return (
     <div className="space-y-6">
       {error && <p className="text-sm text-destructive">{error.message}</p>}
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+          <p className="text-sm text-muted-foreground">Company health, active work, and quick operator actions.</p>
+        </div>
+        <QuickIssueButton agents={agents ?? []} />
+      </div>
 
       {hasNoAgents && (
         <div className="flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-500/25 dark:bg-amber-950/60">

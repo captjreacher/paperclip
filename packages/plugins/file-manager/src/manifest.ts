@@ -4,7 +4,7 @@ export default {
   displayName: "File Manager",
   author: "Paperclip",
   version: "0.1.0",
-  description: "Safe file operations for agents",
+  description: "Safe file operations for agent document folders.",
   categories: ["workspace"],
   capabilities: [
     "agent.tools.register",
@@ -15,6 +15,29 @@ export default {
   entrypoints: {
     worker: "./dist/worker.js",
     ui: "./dist/ui"
+  },
+  instanceConfigSchema: {
+    type: "object",
+    properties: {
+      rootPath: {
+        type: "string",
+        title: "Root Path",
+        default: ".agents",
+        description: "Absolute path, or path relative to the Paperclip server working directory, exposed by this plugin.",
+      },
+      rootLabel: {
+        type: "string",
+        title: "Root Label",
+        default: "Agent documents",
+        description: "Label shown above the file tree.",
+      },
+      readOnly: {
+        type: "boolean",
+        title: "Read Only",
+        default: true,
+        description: "Blocks plugin write_file tool calls when enabled.",
+      },
+    },
   },
   ui: {
     slots: [
@@ -36,7 +59,7 @@ export default {
     {
       name: "list_dir",
       displayName: "List Directory",
-      description: "List files in a safe workspace directory.",
+      description: "List files in the configured agent document root.",
       parametersSchema: {
         type: "object",
         properties: {
@@ -47,7 +70,7 @@ export default {
     {
       name: "read_file",
       displayName: "Read File",
-      description: "Read a file from a safe workspace directory.",
+      description: "Read a file from the configured agent document root.",
       parametersSchema: {
         type: "object",
         required: ["path"],
@@ -59,7 +82,7 @@ export default {
     {
       name: "write_file",
       displayName: "Write File",
-      description: "Write a file inside a safe workspace directory.",
+      description: "Write a file inside the configured agent document root when writes are enabled.",
       parametersSchema: {
         type: "object",
         required: ["path", "content"],

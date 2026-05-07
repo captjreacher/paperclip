@@ -117,6 +117,14 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
 
 const BUNDLED_PLUGIN_EXAMPLES: AvailablePluginExample[] = [
   {
+    packageName: "@paperclipai/plugin-file-manager",
+    pluginKey: "file-manager",
+    displayName: "File Manager",
+    description: "Plugin that exposes a configurable local agent document folder as a sidebar file tree and agent tools.",
+    localPath: "packages/plugins/file-manager",
+    tag: "example",
+  },
+  {
     packageName: "@paperclipai/plugin-hello-world-example",
     pluginKey: "paperclip.hello-world-example",
     displayName: "Hello World Widget (Example)",

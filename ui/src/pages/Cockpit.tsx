@@ -38,6 +38,7 @@ import { cockpitApi } from "@/api/cockpit";
 import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
 import { CockpitIssueModal } from "@/components/CockpitIssueModal";
+import { QuickIssueButton } from "@/components/QuickIssueButton";
 
 type DraftState = "Drafting" | "Needs Review" | "Needs Design" | "Ready to Publish" | "Published" | "Needs Repurpose";
 type BriefState = "Intake" | "Analysis" | "Draft Brief" | "Review" | "Approved" | "Converted to Work";
@@ -1041,10 +1042,6 @@ export function Cockpit() {
 
   const quickActions = [
     {
-      label: "New Issue",
-      onClick: () => pushToast({ title: "Read-only cockpit", body: "TODO: keep issue creation in the dedicated issue flow instead of mutating from Cockpit.", tone: "info" }),
-    },
-    {
       label: "New Brief",
       onClick: () => pushToast({ title: "Brief creation is stubbed", body: "TODO: wire New Brief to a briefs backend endpoint.", tone: "info" }),
     },
@@ -1106,6 +1103,7 @@ export function Cockpit() {
           onMetricSelect={setQueueFilter}
         />
         <div className="flex flex-wrap gap-2 rounded-2xl border border-border bg-card p-3">
+          <QuickIssueButton agents={data.rawAgents} buttonLabel="New Issue" onCreated={() => clearFilters()} />
           {quickActions.map((action) => (
             <Button key={action.label} variant="outline" size="sm" onClick={action.onClick}>
               {action.label}

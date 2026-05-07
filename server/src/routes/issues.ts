@@ -1335,13 +1335,45 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
-    const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
+    const {
+      sourceSystem,
+      issueType,
+      assignedTarget,
+      displayPriority,
+      ...issueInput
+    } = req.body;
+    const executionPolicy = normalizeIssueExecutionPolicy(issueInput.executionPolicy);
     const issue = await svc.create(companyId, {
-      ...req.body,
+      ...issueInput,
       executionPolicy,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
     });
+
+    const activityDetails =
+      sourceSystem === "cockpit"
+        ? {
+            event_type: "issue.created",
+            source_system: "cockpit",
+            sourceSystem: "cockpit",
+            entity_type: "issue",
+            status: "new",
+            payload: {
+              title: issue.title,
+              type: issueType ?? "task",
+              priority: displayPriority ?? issue.priority,
+              assigned_to: assignedTarget ?? issue.assigneeAgentId ?? issue.assigneeUserId ?? "workflow",
+              description: issue.description ?? "",
+            },
+            title: issue.title,
+            identifier: issue.identifier,
+            priority: issue.priority,
+          }
+        : {
+            title: issue.title,
+            identifier: issue.identifier,
+            ...(Array.isArray(issueInput.blockedByIssueIds) ? { blockedByIssueIds: issueInput.blockedByIssueIds } : {}),
+          };
 
     await logActivity(db, {
       companyId,
@@ -1352,11 +1384,7 @@ export function issueRoutes(
       action: "issue.created",
       entityType: "issue",
       entityId: issue.id,
-      details: {
-        title: issue.title,
-        identifier: issue.identifier,
-        ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
-      },
+      details: activityDetails,
     });
 
     void queueIssueAssignmentWakeup({

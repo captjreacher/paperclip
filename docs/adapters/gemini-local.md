@@ -8,7 +8,9 @@ The `gemini_local` adapter runs Google's Gemini CLI locally. It supports session
 ## Prerequisites
 
 - Gemini CLI installed (`gemini` command available)
-- `GEMINI_API_KEY` or `GOOGLE_API_KEY` set, or local Gemini CLI auth configured
+- `GEMINI_API_KEY` / `GOOGLE_API_KEY` set, or local Gemini CLI Google-account auth configured
+
+For Google Workspace, Gemini Code Assist, Google AI Pro, or Ultra quota, use Gemini CLI's Google-account login path rather than an API key. If the Paperclip server has `GEMINI_API_KEY` in its environment, set this adapter's `authMode` to `google_account`; Paperclip will pass `GOOGLE_GENAI_USE_GCA=true` so Gemini CLI uses the cached Google login / Code Assist entitlement instead of API-key quota. Workspace accounts may also require `googleCloudProject`.
 
 ## Configuration Fields
 
@@ -16,6 +18,8 @@ The `gemini_local` adapter runs Google's Gemini CLI locally. It supports session
 |-------|------|----------|-------------|
 | `cwd` | string | Yes | Working directory for the agent process (absolute path; created automatically if missing when permissions allow) |
 | `model` | string | No | Gemini model to use. Defaults to `auto`. |
+| `authMode` | string | No | `auto` or `google_account`. `google_account` forces Gemini CLI Google account / Workspace / Code Assist auth. |
+| `googleCloudProject` | string | No | Google Cloud project ID passed as `GOOGLE_CLOUD_PROJECT` for Workspace / Code Assist accounts. |
 | `promptTemplate` | string | No | Prompt used for all runs |
 | `instructionsFilePath` | string | No | Markdown instructions file prepended to the prompt |
 | `env` | object | No | Environment variables (supports secret refs) |
@@ -41,5 +45,18 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 
 - Gemini CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
-- API key/auth hints (`GEMINI_API_KEY` or `GOOGLE_API_KEY`)
+- API key/auth hints (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, or Google-account auth mode)
 - A live hello probe (`gemini --output-format json "Respond with hello."`) to verify CLI readiness
+
+## Workspace Setup
+
+Google's Gemini CLI docs state that Workspace and Code Assist accounts can need a `GOOGLE_CLOUD_PROJECT` with the Gemini for Cloud API enabled and appropriate IAM access. In Paperclip, configure:
+
+```json
+{
+  "authMode": "google_account",
+  "googleCloudProject": "your-project-id"
+}
+```
+
+Then run `gemini auth login` outside Paperclip using the same Workspace account.

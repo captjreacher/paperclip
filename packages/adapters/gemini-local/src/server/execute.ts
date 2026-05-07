@@ -44,6 +44,7 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
 }
 
 function resolveGeminiBillingType(env: Record<string, string>): "api" | "subscription" {
+  if (env.GOOGLE_GENAI_USE_GCA === "true") return "subscription";
   return hasNonEmptyEnvValue(env, "GEMINI_API_KEY") || hasNonEmptyEnvValue(env, "GOOGLE_API_KEY")
     ? "api"
     : "subscription";
@@ -213,6 +214,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
+  }
+  const authMode = asString(config.authMode, "auto").trim();
+  if (authMode === "google_account") {
+    env.GOOGLE_GENAI_USE_GCA = "true";
+  }
+  const googleCloudProject = asString(config.googleCloudProject, "").trim();
+  if (googleCloudProject) {
+    env.GOOGLE_CLOUD_PROJECT = googleCloudProject;
   }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;

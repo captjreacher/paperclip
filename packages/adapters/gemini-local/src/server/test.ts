@@ -71,6 +71,14 @@ export async function testEnvironment(
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  const authMode = asString(config.authMode, "auto").trim();
+  if (authMode === "google_account") {
+    env.GOOGLE_GENAI_USE_GCA = "true";
+  }
+  const googleCloudProject = asString(config.googleCloudProject, "").trim();
+  if (googleCloudProject) {
+    env.GOOGLE_CLOUD_PROJECT = googleCloudProject;
+  }
   const runtimeEnv = ensurePathInEnv({ ...process.env, ...env });
   try {
     await ensureCommandResolvable(command, cwd, runtimeEnv);

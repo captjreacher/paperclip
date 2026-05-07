@@ -17,6 +17,8 @@ export const defaultCreateValues: CreateConfigValues = {
   extraArgs: "",
   envVars: "",
   envBindings: {},
+  geminiAuthMode: "auto",
+  googleCloudProject: "",
   url: "",
   bootstrapPrompt: "",
   payloadTemplateJson: "",

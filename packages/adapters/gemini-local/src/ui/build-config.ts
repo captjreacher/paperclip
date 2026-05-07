@@ -60,6 +60,8 @@ export function buildGeminiLocalConfig(v: CreateConfigValues): Record<string, un
   ac.model = v.model || DEFAULT_GEMINI_LOCAL_MODEL;
   ac.timeoutSec = 0;
   ac.graceSec = 15;
+  if (v.geminiAuthMode && v.geminiAuthMode !== "auto") ac.authMode = v.geminiAuthMode;
+  if (v.googleCloudProject?.trim()) ac.googleCloudProject = v.googleCloudProject.trim();
   const env = parseEnvBindings(v.envBindings);
   const legacy = parseEnvVars(v.envVars);
   for (const [key, value] of Object.entries(legacy)) {

@@ -409,6 +409,8 @@ export interface CreateConfigValues {
   extraArgs: string;
   envVars: string;
   envBindings: Record<string, unknown>;
+  geminiAuthMode?: string;
+  googleCloudProject?: string;
   url: string;
   bootstrapPrompt: string;
   payloadTemplateJson?: string;

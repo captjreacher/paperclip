@@ -26,6 +26,7 @@ For Google Workspace, Gemini Code Assist, Google AI Pro, or Ultra quota, use Gem
 | `timeoutSec` | number | No | Process timeout (0 = no timeout) |
 | `graceSec` | number | No | Grace period before force-kill |
 | `yolo` | boolean | No | Pass `--approval-mode yolo` for unattended operation |
+| `extraArgs` | string[] | No | Additional Gemini CLI flags. Do not include prompt text or `-p` / `--prompt`; Paperclip supplies the non-interactive prompt on stdin. |
 
 ## Session Persistence
 
@@ -46,7 +47,9 @@ Use the "Test Environment" button in the UI to validate the adapter config. It c
 - Gemini CLI is installed and accessible
 - Working directory is absolute and available (auto-created if missing and permitted)
 - API key/auth hints (`GEMINI_API_KEY`, `GOOGLE_API_KEY`, or Google-account auth mode)
-- A live hello probe (`gemini --output-format json "Respond with hello."`) to verify CLI readiness
+- A live hello probe (`gemini --output-format stream-json --prompt "Respond with hello."`) to verify CLI readiness
+
+Agent runs invoke Gemini with `--prompt ""` and send the rendered Paperclip prompt on stdin. This avoids Windows command-line quoting and length issues for large multi-line prompts.
 
 ## Workspace Setup
 

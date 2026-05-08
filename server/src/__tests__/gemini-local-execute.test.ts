@@ -17,8 +17,10 @@ const argv = promptIndex >= 0
     ]
   : rawArgv;
 const capturePath = process.env.PAPERCLIP_TEST_CAPTURE_PATH;
+const stdin = fs.readFileSync(0, "utf8");
 const payload = {
   argv,
+  stdin,
   geminiAuth: {
     googleGenaiUseGca: process.env.GOOGLE_GENAI_USE_GCA || null,
     googleCloudProject: process.env.GOOGLE_CLOUD_PROJECT || null,
@@ -63,6 +65,7 @@ function fakeGeminiCommandPath(root: string): string {
 
 type CapturePayload = {
   argv: string[];
+  stdin: string;
   geminiAuth?: {
     googleGenaiUseGca: string | null;
     googleCloudProject: string | null;
@@ -71,7 +74,7 @@ type CapturePayload = {
 };
 
 describe("gemini execute", () => {
-  it("passes prompt via --prompt and injects paperclip env vars", async () => {
+  it("passes prompt via stdin with --prompt and injects paperclip env vars", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-execute-"));
     const workspace = path.join(root, "workspace");
     const commandPath = fakeGeminiCommandPath(root);
@@ -127,7 +130,8 @@ describe("gemini execute", () => {
       expect(capture.argv).toContain("yolo");
       const promptFlagIndex = capture.argv.indexOf("--prompt");
       const promptArg = promptFlagIndex >= 0 ? capture.argv[promptFlagIndex + 1] : "";
-      expect(promptArg).toContain("Paperclip runtime note:");
+      expect(promptArg).toBe("");
+      expect(capture.stdin).toContain("Paperclip runtime note:");
       expect(capture.paperclipEnvKeys).toEqual(
         expect.arrayContaining([
           "PAPERCLIP_AGENT_ID",
@@ -143,6 +147,68 @@ describe("gemini execute", () => {
       expect(invocationPrompt).toContain("run_shell_command");
       expect(invocationPrompt).toContain("Follow the paperclip heartbeat.");
       expect(result.question).toBeNull();
+    } finally {
+      if (previousHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = previousHome;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("drops prompt-like extra args so Gemini does not receive both positional and --prompt input", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-gemini-extra-prompt-"));
+    const workspace = path.join(root, "workspace");
+    const commandPath = fakeGeminiCommandPath(root);
+    const capturePath = path.join(root, "capture.json");
+    await fs.mkdir(workspace, { recursive: true });
+    await writeFakeGeminiCommand(commandPath);
+
+    const previousHome = process.env.HOME;
+    process.env.HOME = root;
+
+    const stderrLogs: string[] = [];
+    try {
+      const result = await execute({
+        runId: "run-extra-prompt",
+        agent: { id: "a1", companyId: "c1", name: "G", adapterType: "gemini_local", adapterConfig: {} },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: {
+          command: commandPath,
+          cwd: workspace,
+          env: { PAPERCLIP_TEST_CAPTURE_PATH: capturePath },
+          extraArgs: [
+            "legacy positional prompt",
+            "--prompt",
+            "do the wrong thing",
+            "-p",
+            "--approval-mode",
+            "yolo",
+            "--model",
+            "gemini-2.0-flash",
+          ],
+          promptTemplate: "Follow the paperclip heartbeat.",
+        },
+        context: {},
+        authToken: "t",
+        onLog: async (stream, message) => {
+          if (stream === "stderr") stderrLogs.push(message);
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
+      expect(capture.argv.filter((arg) => arg === "--prompt")).toHaveLength(1);
+      const promptFlagIndex = capture.argv.indexOf("--prompt");
+      const promptArg = promptFlagIndex >= 0 ? capture.argv[promptFlagIndex + 1] : "";
+      expect(promptArg).toBe("");
+      expect(capture.stdin).toContain("Follow the paperclip heartbeat.");
+      expect(capture.argv).not.toContain("legacy positional prompt");
+      expect(capture.argv).not.toContain("do the wrong thing");
+      expect(capture.argv).toEqual(expect.arrayContaining(["--model", "gemini-2.0-flash"]));
+      expect(capture.argv).toEqual(expect.arrayContaining(["--approval-mode", "yolo"]));
+      expect(stderrLogs.join("")).toContain("Ignored Gemini extraArgs");
     } finally {
       if (previousHome === undefined) {
         delete process.env.HOME;
@@ -333,7 +399,8 @@ describe("gemini execute", () => {
       const promptArg = promptFlagIndex >= 0 ? capture.argv[promptFlagIndex + 1] : "";
       expect(capture.argv).toContain("--resume");
       expect(capture.argv).toContain("gemini-session-1");
-      expect(promptArg).toContain("## Paperclip Resume Delta");
+      expect(promptArg).toBe("");
+      expect(capture.stdin).toContain("## Paperclip Resume Delta");
       expect(invocationPrompt).toContain("Do not switch to another issue until you have handled this wake.");
       expect(invocationPrompt).toContain("Second comment");
       expect(invocationPrompt).not.toContain("Follow the paperclip heartbeat.");

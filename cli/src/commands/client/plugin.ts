@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import pc from "picocolors";
 import {
@@ -51,16 +52,69 @@ interface PluginUninstallOptions extends BaseClientOptions {
  * Resolve a local path argument to an absolute path so the server can find the
  * plugin on disk regardless of where the user ran the CLI.
  */
-function resolvePackageArg(packageArg: string, isLocal: boolean): string {
-  if (!isLocal) return packageArg;
-  // Already absolute
-  if (path.isAbsolute(packageArg)) return packageArg;
-  // Expand leading ~ to home directory
-  if (packageArg.startsWith("~")) {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-    return path.resolve(home, packageArg.slice(1).replace(/^[\\/]/, ""));
+const WINDOWS_DRIVE_ABS_REGEX = /^[A-Za-z]:[\\/]/;
+const WINDOWS_UNC_ABS_REGEX = /^\\\\[^\\]+\\[^\\]+/;
+const FILE_SPEC_PREFIX_REGEX = /^file:/i;
+
+export function isWindowsAbsolutePath(value: string): boolean {
+  return WINDOWS_DRIVE_ABS_REGEX.test(value) || WINDOWS_UNC_ABS_REGEX.test(value);
+}
+
+function decodeFilePathRemainder(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
   }
-  return path.resolve(process.cwd(), packageArg);
+}
+
+function fileSpecifierToPath(fileSpecifier: string): string | null {
+  if (!FILE_SPEC_PREFIX_REGEX.test(fileSpecifier)) return null;
+
+  if (/^file:\/\//i.test(fileSpecifier)) {
+    try {
+      return fileURLToPath(new URL(fileSpecifier));
+    } catch {
+      return null;
+    }
+  }
+
+  const rawRemainder = fileSpecifier.slice("file:".length);
+  if (!rawRemainder) return null;
+
+  const remainder = decodeFilePathRemainder(rawRemainder);
+  if (remainder.startsWith("~")) return remainder;
+  if (path.isAbsolute(remainder) || isWindowsAbsolutePath(remainder)) return remainder;
+  if (/^\/[A-Za-z]:[\\/]/.test(remainder)) return remainder.slice(1);
+  return remainder;
+}
+
+export function isLikelyLocalPluginSpec(packageArg: string): boolean {
+  return (
+    FILE_SPEC_PREFIX_REGEX.test(packageArg) ||
+    packageArg.startsWith("./") ||
+    packageArg.startsWith(".\\") ||
+    packageArg.startsWith("../") ||
+    packageArg.startsWith("..\\") ||
+    packageArg.startsWith("/") ||
+    packageArg.startsWith("~") ||
+    path.isAbsolute(packageArg) ||
+    isWindowsAbsolutePath(packageArg)
+  );
+}
+
+export function resolvePackageArg(packageArg: string, isLocal: boolean): string {
+  if (!isLocal) return packageArg;
+  const fromFileSpecifier = fileSpecifierToPath(packageArg);
+  const normalizedArg = fromFileSpecifier ?? packageArg;
+  // Already absolute
+  if (path.isAbsolute(normalizedArg) || isWindowsAbsolutePath(normalizedArg)) return normalizedArg;
+  // Expand leading ~ to home directory
+  if (normalizedArg.startsWith("~")) {
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+    return path.resolve(home, normalizedArg.slice(1).replace(/^[\\/]/, ""));
+  }
+  return path.resolve(process.cwd(), normalizedArg);
 }
 
 function formatPlugin(p: PluginRecord): string {
@@ -147,13 +201,8 @@ export function registerPluginCommands(program: Command): void {
         try {
           const ctx = resolveCommandContext(opts);
 
-          // Auto-detect local paths: starts with . or / or ~ or is an absolute path
-          const isLocal =
-            opts.local ||
-            packageArg.startsWith("./") ||
-            packageArg.startsWith("../") ||
-            packageArg.startsWith("/") ||
-            packageArg.startsWith("~");
+          // Auto-detect local specs (relative/absolute paths, Windows paths, and file: specifiers).
+          const isLocal = opts.local || isLikelyLocalPluginSpec(packageArg);
 
           const resolvedPackage = resolvePackageArg(packageArg, isLocal);
 

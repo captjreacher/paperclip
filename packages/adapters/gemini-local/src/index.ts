@@ -30,6 +30,8 @@ Core fields:
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to the run prompt
 - promptTemplate (string, optional): run prompt template
 - model (string, optional): Gemini model id. Defaults to auto.
+- authMode (string, optional): set to "google_account" to force Gemini CLI Google account / Workspace / Code Assist auth with GOOGLE_GENAI_USE_GCA=true.
+- googleCloudProject (string, optional): project ID passed as GOOGLE_CLOUD_PROJECT for Workspace / Code Assist accounts that require it.
 - sandbox (boolean, optional): run in sandbox mode (default: false, passes --sandbox=none)
 - command (string, optional): defaults to "gemini"
 - extraArgs (string[], optional): additional CLI args
@@ -40,8 +42,8 @@ Operational fields:
 - graceSec (number, optional): SIGTERM grace period in seconds
 
 Notes:
-- Runs use positional prompt arguments, not stdin.
+- Runs use an empty --prompt flag plus stdin for non-interactive execution. Do not put prompt text, -p, --prompt, -i, or --prompt-interactive in extraArgs.
 - Sessions resume with --resume when stored session cwd matches the current cwd.
 - Paperclip auto-injects local skills into \`~/.gemini/skills/\` via symlinks, so the CLI can discover both credentials and skills in their natural location.
-- Authentication can use GEMINI_API_KEY / GOOGLE_API_KEY or local Gemini CLI login.
+- Authentication can use GEMINI_API_KEY / GOOGLE_API_KEY, local Gemini CLI login, or authMode="google_account" for Workspace / Code Assist subscription quota.
 `;

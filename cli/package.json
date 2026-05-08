@@ -29,12 +29,12 @@
   "publishConfig": {
     "access": "public"
   },
-  "scripts": {
-    "dev": "tsx src/index.ts",
-    "build": "node --input-type=module -e \"import esbuild from 'esbuild'; import config from './esbuild.config.mjs'; await esbuild.build(config);\" && chmod +x dist/index.js",
-    "clean": "rm -rf dist",
-    "typecheck": "tsc --noEmit"
-  },
+    "scripts": {
+        "dev": "tsx src/index.ts",
+        "build": "node --input-type=module -e \"import esbuild from 'esbuild'; import config from './esbuild.config.mjs'; await esbuild.build(config); if (process.platform !== 'win32') { const { chmodSync } = await import('fs'); chmodSync('dist/index.js', 0o755); }\"",
+        "clean": "rm -rf dist",
+        "typecheck": "tsc --noEmit"
+    },
   "dependencies": {
     "@clack/prompts": "^0.10.0",
     "@paperclipai/adapter-claude-local": "workspace:*",

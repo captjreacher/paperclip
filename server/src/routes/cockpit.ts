@@ -153,7 +153,15 @@ export function cockpitRoutes(db: Db) {
       activityConditions.push(eq(activityLog.entityId, filters.issueId));
     }
     if (filters.eventType) activityConditions.push(eq(activityLog.action, filters.eventType));
-    if (filters.sourceSystem) activityConditions.push(eq(activityLog.actorType, filters.sourceSystem));
+    if (filters.sourceSystem) {
+      activityConditions.push(
+        or(
+          eq(activityLog.actorType, filters.sourceSystem),
+          sql`${activityLog.details} ->> 'sourceSystem' = ${filters.sourceSystem}`,
+          sql`${activityLog.details} ->> 'source_system' = ${filters.sourceSystem}`,
+        )!,
+      );
+    }
     if (filters.from) activityConditions.push(gte(activityLog.createdAt, new Date(filters.from)));
     if (filters.to) activityConditions.push(lte(activityLog.createdAt, new Date(filters.to)));
 
@@ -187,7 +195,9 @@ export function cockpitRoutes(db: Db) {
 
     return [
       ...activityRows.map((row): CockpitEventRow => {
-        const payload = {
+        const details = asRecord(row.details);
+        const eventEnvelope = details?.event_type || details?.source_system ? details : null;
+        const payload = eventEnvelope ?? {
           actorType: row.actorType,
           actorId: row.actorId,
           entityType: row.entityType,
@@ -196,13 +206,19 @@ export function cockpitRoutes(db: Db) {
           runId: row.runId,
           details: row.details ?? null,
         };
-        const issueId = row.entityType === "issue" ? row.entityId : asRecord(row.details)?.issueId;
+        const issueId = row.entityType === "issue" ? row.entityId : details?.issueId;
+        const sourceSystem =
+          typeof details?.sourceSystem === "string"
+            ? details.sourceSystem
+            : typeof details?.source_system === "string"
+              ? details.source_system
+              : row.actorType;
         return {
           id: row.id,
           createdAt: row.createdAt,
           eventType: row.action,
           issueId: typeof issueId === "string" ? issueId : null,
-          sourceSystem: row.actorType,
+          sourceSystem,
           payloadSummary: summarizePayload(payload),
           payload,
         };

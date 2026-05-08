@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-
+import 'dotenv/config'
 import pc from "picocolors";
 import { deployWithLogging } from "./deploy.js";
 

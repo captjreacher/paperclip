@@ -44,9 +44,74 @@ function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean 
 }
 
 function resolveGeminiBillingType(env: Record<string, string>): "api" | "subscription" {
+  if (env.GOOGLE_GENAI_USE_GCA === "true") return "subscription";
   return hasNonEmptyEnvValue(env, "GEMINI_API_KEY") || hasNonEmptyEnvValue(env, "GOOGLE_API_KEY")
     ? "api"
     : "subscription";
+}
+
+const GEMINI_PROMPT_FLAGS = new Set(["--prompt", "-p", "--prompt-interactive", "-i"]);
+
+const GEMINI_EXTRA_ARGS_WITH_VALUE = new Set([
+  "--model",
+  "-m",
+  "--worktree",
+  "-w",
+  "--approval-mode",
+  "--policy",
+  "--admin-policy",
+  "--allowed-mcp-server-names",
+  "--allowed-tools",
+  "--extensions",
+  "-e",
+  "--resume",
+  "-r",
+  "--delete-session",
+  "--include-directories",
+  "--output-format",
+  "-o",
+]);
+
+function sanitizeGeminiExtraArgs(extraArgs: string[]): { args: string[]; removed: string[] } {
+  const args: string[] = [];
+  const removed: string[] = [];
+  let previousNeedsValue = false;
+
+  for (let index = 0; index < extraArgs.length; index += 1) {
+    const arg = extraArgs[index];
+    const eq = arg.indexOf("=");
+    const flagName = eq >= 0 ? arg.slice(0, eq) : arg;
+
+    if (previousNeedsValue) {
+      args.push(arg);
+      previousNeedsValue = false;
+      continue;
+    }
+
+    if (arg === "--") {
+      removed.push(...extraArgs.slice(index));
+      break;
+    }
+
+    if (GEMINI_PROMPT_FLAGS.has(flagName)) {
+      removed.push(arg);
+      if (eq < 0 && index + 1 < extraArgs.length && !extraArgs[index + 1].startsWith("-")) {
+        removed.push(extraArgs[index + 1]);
+        index += 1;
+      }
+      continue;
+    }
+
+    if (!arg.startsWith("-")) {
+      removed.push(arg);
+      continue;
+    }
+
+    args.push(arg);
+    previousNeedsValue = eq < 0 && GEMINI_EXTRA_ARGS_WITH_VALUE.has(arg);
+  }
+
+  return { args, removed };
 }
 
 function renderPaperclipEnvNote(env: Record<string, string>): string {
@@ -214,6 +279,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   for (const [key, value] of Object.entries(envConfig)) {
     if (typeof value === "string") env[key] = value;
   }
+  const authMode = asString(config.authMode, "auto").trim();
+  if (authMode === "google_account") {
+    env.GOOGLE_GENAI_USE_GCA = "true";
+  }
+  const googleCloudProject = asString(config.googleCloudProject, "").trim();
+  if (googleCloudProject) {
+    env.GOOGLE_CLOUD_PROJECT = googleCloudProject;
+  }
   if (!hasExplicitApiKey && authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
@@ -234,11 +307,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
   const graceSec = asNumber(config.graceSec, 20);
-  const extraArgs = (() => {
+  const rawExtraArgs = (() => {
     const fromExtraArgs = asStringArray(config.extraArgs);
     if (fromExtraArgs.length > 0) return fromExtraArgs;
     return asStringArray(config.args);
   })();
+  const { args: extraArgs, removed: removedExtraArgs } = sanitizeGeminiExtraArgs(rawExtraArgs);
+  if (removedExtraArgs.length > 0) {
+    await onLog(
+      "stderr",
+      `[paperclip] Ignored Gemini extraArgs that would conflict with Paperclip-managed headless prompting: ${removedExtraArgs.map((arg) => JSON.stringify(arg)).join(", ")}\n`,
+    );
+  }
 
   const runtimeSessionParams = parseObject(runtime.sessionParams);
   const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
@@ -273,8 +353,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
   const commandNotes = (() => {
-    const notes: string[] = ["Prompt is passed to Gemini via --prompt for non-interactive execution."];
+    const notes: string[] = ["Prompt is passed to Gemini on stdin with an empty --prompt flag for non-interactive execution."];
     notes.push("Added --approval-mode yolo for unattended execution.");
+    if (removedExtraArgs.length > 0) {
+      notes.push("Ignored prompt/query entries from extraArgs because Paperclip supplies the Gemini prompt.");
+    }
     if (!instructionsFilePath) return notes;
     if (instructionsPrefix.length > 0) {
       notes.push(
@@ -339,7 +422,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       args.push("--sandbox=none");
     }
     if (extraArgs.length > 0) args.push(...extraArgs);
-    args.push("--prompt", prompt);
+    args.push("--prompt", "");
     return args;
   };
 
@@ -352,7 +435,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         cwd,
         commandNotes,
         commandArgs: args.map((value, index) => (
-          index === args.length - 1 ? `<prompt ${prompt.length} chars>` : value
+          args[index - 1] === "--prompt" && value === "" ? `<prompt via stdin ${prompt.length} chars>` : value
         )),
         env: loggedEnv,
         prompt,
@@ -368,6 +451,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onLog,
+      stdin: prompt,
     });
     return {
       proc,

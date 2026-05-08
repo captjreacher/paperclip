@@ -117,6 +117,14 @@ const REPO_ROOT = path.resolve(__dirname, "../../..");
 
 const BUNDLED_PLUGIN_EXAMPLES: AvailablePluginExample[] = [
   {
+    packageName: "@paperclipai/plugin-file-manager",
+    pluginKey: "file-manager",
+    displayName: "File Manager",
+    description: "Plugin that exposes a configurable local agent document folder as a sidebar file tree and agent tools.",
+    localPath: "packages/plugins/file-manager",
+    tag: "example",
+  },
+  {
     packageName: "@paperclipai/plugin-hello-world-example",
     pluginKey: "paperclip.hello-world-example",
     displayName: "Hello World Widget (Example)",
@@ -141,6 +149,66 @@ const BUNDLED_PLUGIN_EXAMPLES: AvailablePluginExample[] = [
     tag: "example",
   },
 ];
+
+const FILE_SPEC_PREFIX_REGEX = /^file:/i;
+const WINDOWS_DRIVE_ABS_REGEX = /^[A-Za-z]:[\\/]/;
+const WINDOWS_UNC_ABS_REGEX = /^\\\\[^\\]+\\[^\\]+/;
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return WINDOWS_DRIVE_ABS_REGEX.test(value) || WINDOWS_UNC_ABS_REGEX.test(value);
+}
+
+function decodeFilePathRemainder(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function fileSpecifierToPath(fileSpecifier: string): string | null {
+  if (!FILE_SPEC_PREFIX_REGEX.test(fileSpecifier)) return null;
+
+  if (/^file:\/\//i.test(fileSpecifier)) {
+    try {
+      return fileURLToPath(new URL(fileSpecifier));
+    } catch {
+      return null;
+    }
+  }
+
+  const rawRemainder = fileSpecifier.slice("file:".length);
+  if (!rawRemainder) return null;
+  const remainder = decodeFilePathRemainder(rawRemainder);
+
+  if (remainder.startsWith("~")) return remainder;
+  if (path.isAbsolute(remainder) || path.win32.isAbsolute(remainder)) return remainder;
+  if (/^\/[A-Za-z]:[\\/]/.test(remainder)) return remainder.slice(1);
+  return remainder;
+}
+
+function looksLikeLocalPathSpec(value: string): boolean {
+  return (
+    FILE_SPEC_PREFIX_REGEX.test(value) ||
+    value.startsWith("./") ||
+    value.startsWith(".\\") ||
+    value.startsWith("../") ||
+    value.startsWith("..\\") ||
+    value.startsWith("/") ||
+    value.startsWith("~") ||
+    path.isAbsolute(value) ||
+    path.win32.isAbsolute(value) ||
+    isWindowsAbsolutePath(value)
+  );
+}
+
+function normalizeInstallSpecifier(rawSpecifier: string): { normalized: string; isLocalPath: boolean } {
+  const filePath = fileSpecifierToPath(rawSpecifier);
+  if (filePath) {
+    return { normalized: filePath, isLocalPath: true };
+  }
+  return { normalized: rawSpecifier, isLocalPath: looksLikeLocalPathSpec(rawSpecifier) };
+}
 
 function listBundledPluginExamples(): AvailablePluginExample[] {
   return BUNDLED_PLUGIN_EXAMPLES.flatMap((plugin) => {
@@ -631,16 +699,20 @@ export function pluginRoutes(
       return;
     }
 
+    const normalizedSpec = normalizeInstallSpecifier(trimmedPackage);
+    // Preserve explicit opt-in while still auto-detecting local specs even if callers pass false.
+    const treatAsLocalPath = isLocalPath === true || normalizedSpec.isLocalPath;
+
     // Basic security check for package name (prevent injection)
-    if (!isLocalPath && /[<>:"|?*]/.test(trimmedPackage)) {
+    if (!treatAsLocalPath && /[<>:"|?*]/.test(normalizedSpec.normalized)) {
       res.status(400).json({ error: "packageName contains invalid characters" });
       return;
     }
 
     try {
-      const installOptions = isLocalPath
-        ? { localPath: trimmedPackage }
-        : { packageName: trimmedPackage, version: version?.trim() };
+      const installOptions = treatAsLocalPath
+        ? { localPath: normalizedSpec.normalized }
+        : { packageName: normalizedSpec.normalized, version: version?.trim() };
 
       const discovered = await loader.installPlugin(installOptions);
 
@@ -659,7 +731,7 @@ export function pluginRoutes(
           pluginKey: existingPlugin.pluginKey,
           packageName: updated?.packageName ?? existingPlugin.packageName,
           version: updated?.version ?? existingPlugin.version,
-          source: isLocalPath ? "local_path" : "npm",
+          source: treatAsLocalPath ? "local_path" : "npm",
         });
         publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
         res.json(updated);

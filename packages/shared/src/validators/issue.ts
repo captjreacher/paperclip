@@ -134,6 +134,10 @@ export const createIssueSchema = z.object({
   executionWorkspacePreference: z.enum(ISSUE_EXECUTION_WORKSPACE_PREFERENCES).optional().nullable(),
   executionWorkspaceSettings: issueExecutionWorkspaceSettingsSchema.optional().nullable(),
   labelIds: z.array(z.string().uuid()).optional(),
+  sourceSystem: z.string().trim().min(1).max(64).optional(),
+  issueType: z.enum(["bug", "task", "content", "lead", "incident", "workflow"]).optional(),
+  assignedTarget: z.string().trim().min(1).max(128).optional(),
+  displayPriority: z.enum(["low", "normal", "high", "urgent"]).optional(),
 });
 
 export type CreateIssue = z.infer<typeof createIssueSchema>;
